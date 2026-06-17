@@ -1,0 +1,24 @@
+pixi.lock
+.pixi/
+__pycache__/
+test_models/
+validation/
+checkpoints/
+quantized_models/
+Minimax-M2.7/
+steering_data/
+steering_data_big/
+
+# Compiled executables
+test_linux_threading
+test_burst
+test_debug
+test_theories
+bench_hot_cold
+bench_dispatch
+bench_numa_burst
+test_smollm2
+test_advanced_load.mojo
+test_tokenizer_load.mojo
+smollm2_tp1
+*.mojoc

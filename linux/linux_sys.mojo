@@ -1,0 +1,607 @@
+from std.memory import UnsafePointer
+
+comptime KernelPtr = UInt64
+comptime KernelFlags = UInt64
+comptime KernelFlags32 = UInt32
+
+comptime EINTR: Int = -4
+comptime EAGAIN: Int = -11
+
+struct CloneFlags(TrivialRegisterPassable):
+    comptime VM = 0x00000100
+    comptime FS = 0x00000200
+    comptime FILES = 0x00000400
+    comptime SIGHAND = 0x00000800
+    comptime PIDFD = 0x00001000
+    comptime PTRACE = 0x00002000
+    comptime VFORK = 0x00004000
+    comptime PARENT = 0x00008000
+    comptime THREAD = 0x00010000
+    comptime NEWNS = 0x00020000
+    comptime SYSVSEM = 0x00040000
+    comptime SETTLS = 0x00080000
+    comptime PARENT_SETTID = 0x00100000
+    comptime CHILD_CLEARTID = 0x00200000
+    comptime DETACHED = 0x00400000
+    comptime UNTRACED = 0x00800000
+    comptime CHILD_SETTID = 0x01000000
+    comptime NEWCGROUP = 0x02000000
+    comptime NEWUTS = 0x04000000
+    comptime NEWIPC = 0x08000000
+    comptime NEWUSER = 0x10000000
+    comptime NEWPID = 0x20000000
+    comptime NEWNET = 0x40000000
+    comptime IO = 0x80000000
+    comptime THREAD_FLAGS = (
+        Self.VM | Self.FS | Self.FILES | Self.SIGHAND |
+        Self.THREAD | Self.SYSVSEM | Self.SETTLS |
+        Self.PARENT_SETTID | Self.CHILD_CLEARTID
+    )
+
+struct Futex2(TrivialRegisterPassable):
+    comptime SIZE_U8 = 0x00
+    comptime SIZE_U16 = 0x01
+    comptime SIZE_U32 = 0x02
+    comptime SIZE_U64 = 0x03
+    comptime NUMA = 0x04
+    comptime PRIVATE = 0x80
+
+struct Signal(TrivialRegisterPassable):
+    comptime ABRT = 6
+    comptime SEGV = 11
+
+struct SigActionFlag(TrivialRegisterPassable):
+    comptime SIGINFO = 0x00000004
+    comptime ONSTACK = 0x08000000
+    comptime RESTART = 0x10000000
+    comptime NODEFER = 0x40000000
+    comptime RESETHAND = 0x80000000
+
+@fieldwise_init
+struct SigSet64(TrivialRegisterPassable):
+    var bits0: UInt64
+
+@fieldwise_init
+struct RtSigAction(TrivialRegisterPassable):
+    var handler: Int
+    var flags: UInt64
+    var mask: SigSet64
+
+@fieldwise_init
+struct SigSegvContext(TrivialRegisterPassable):
+    var ip: UInt64
+    var sp: UInt64
+    var fault_addr: UInt64
+
+struct StackT(TrivialRegisterPassable):
+    var ss_sp: Int
+    var ss_flags: Int32
+    var pad: Int32
+    var ss_size: UInt64
+
+    def __init__(out self):
+        self.ss_sp = 0
+        self.ss_flags = 0
+        self.pad = 0
+        self.ss_size = 0
+
+@fieldwise_init
+struct Clone3Args(TrivialRegisterPassable):
+    var flags: KernelFlags
+    var pidfd: KernelPtr
+    var child_tid: KernelPtr
+    var parent_tid: KernelPtr
+    var exit_signal: UInt64
+    var stack: KernelPtr
+    var stack_size: UInt64
+    var tls: KernelPtr
+    var set_tid: KernelPtr
+    var set_tid_size: UInt64
+    var cgroup: UInt64
+
+    @staticmethod
+    def thread(stack: Int, stack_size: Int, tls: Int, child_tid_addr: Int) -> Self:
+        return Self(
+            flags=CloneFlags.THREAD_FLAGS,
+            pidfd=0,
+            child_tid=UInt64(child_tid_addr),
+            parent_tid=UInt64(child_tid_addr),
+            exit_signal=0,
+            stack=UInt64(stack),
+            stack_size=UInt64(stack_size),
+            tls=UInt64(tls),
+            set_tid=0,
+            set_tid_size=0,
+            cgroup=0,
+        )
+
+struct Prot(TrivialRegisterPassable):
+    comptime NONE = 0x0
+    comptime READ = 0x1
+    comptime WRITE = 0x2
+    comptime EXEC = 0x4
+    comptime RW = Self.READ | Self.WRITE
+    comptime RWX = Self.READ | Self.WRITE | Self.EXEC
+
+struct MapFlag(TrivialRegisterPassable):
+    comptime SHARED = 0x01
+    comptime PRIVATE = 0x02
+    comptime FIXED = 0x10
+    comptime ANONYMOUS = 0x20
+    comptime NORESERVE = 0x4000
+    comptime POPULATE = 0x8000
+    comptime HUGETLB = 0x40000
+    comptime HUGE_2MB = 21 << 26
+    comptime HUGE_1GB = 30 << 26
+
+struct Mempolicy(TrivialRegisterPassable):
+    comptime DEFAULT = 0
+    comptime PREFERRED = 1
+    comptime BIND = 2
+    comptime INTERLEAVE = 3
+    comptime LOCAL = 4
+
+struct Madvise(TrivialRegisterPassable):
+    comptime NORMAL = 0
+    comptime RANDOM = 1
+    comptime SEQUENTIAL = 2
+    comptime WILLNEED = 3
+    comptime DONTNEED = 4
+    comptime HUGEPAGE = 14
+    comptime NOHUGEPAGE = 15
+    comptime POPULATE_READ = 22
+    comptime POPULATE_WRITE = 23
+
+struct PageSize(TrivialRegisterPassable):
+    comptime STANDARD = 4096
+    comptime THP_2MB = 2 * 1024 * 1024
+    comptime EXPLICIT_2MB = -2
+    comptime EXPLICIT_1GB = -1
+
+struct IoUringEnter(TrivialRegisterPassable):
+    comptime GETEVENTS = 1 << 0
+    comptime SQ_WAKEUP = 1 << 1
+    comptime SQ_WAIT = 1 << 2
+    comptime EXT_ARG = 1 << 3
+    comptime REGISTERED_RING = 1 << 4
+
+struct IoUringSqeFlags(TrivialRegisterPassable):
+    comptime FIXED_FILE = 1 << 0
+    comptime IO_DRAIN = 1 << 1
+    comptime IO_LINK = 1 << 2
+    comptime IO_HARDLINK = 1 << 3
+    comptime ASYNC = 1 << 4
+    comptime BUFFER_SELECT = 1 << 5
+    comptime CQE_SKIP_SUCCESS = 1 << 6
+
+struct IoUringOp(TrivialRegisterPassable):
+    comptime NOP = 0
+    comptime READV = 1
+    comptime WRITEV = 2
+    comptime FSYNC = 3
+    comptime READ_FIXED = 4
+    comptime WRITE_FIXED = 5
+    comptime POLL_ADD = 6
+    comptime POLL_REMOVE = 7
+    comptime SYNC_FILE_RANGE = 8
+    comptime SENDMSG = 9
+    comptime RECVMSG = 10
+    comptime TIMEOUT = 11
+    comptime TIMEOUT_REMOVE = 12
+    comptime ACCEPT = 13
+    comptime ASYNC_CANCEL = 14
+    comptime LINK_TIMEOUT = 15
+    comptime CONNECT = 16
+    comptime FALLOCATE = 17
+    comptime OPENAT = 18
+    comptime CLOSE = 19
+    comptime FILES_UPDATE = 20
+    comptime STATX = 21
+    comptime READ = 22
+    comptime WRITE = 23
+    comptime FADVISE = 24
+    comptime MADVISE = 25
+    comptime SEND = 26
+    comptime RECV = 27
+    comptime OPENAT2 = 28
+    comptime EPOLL_CTL = 29
+    comptime SPLICE = 30
+    comptime PROVIDE_BUFFERS = 31
+    comptime REMOVE_BUFFERS = 32
+
+struct IoUringRegisterOp(TrivialRegisterPassable):
+    comptime REGISTER_BUFFERS = 0
+    comptime UNREGISTER_BUFFERS = 1
+    comptime REGISTER_FILES = 2
+    comptime UNREGISTER_FILES = 3
+    comptime REGISTER_EVENTFD = 4
+    comptime UNREGISTER_EVENTFD = 5
+    comptime REGISTER_FILES_UPDATE = 6
+    comptime REGISTER_EVENTFD_ASYNC = 7
+    comptime REGISTER_PROBE = 8
+    comptime REGISTER_PERSONALITY = 9
+    comptime UNREGISTER_PERSONALITY = 10
+
+struct SqRingOffsets(TrivialRegisterPassable):
+    var head: UInt32
+    var tail: UInt32
+    var ring_mask: UInt32
+    var ring_entries: UInt32
+    var flags: UInt32
+    var dropped: UInt32
+    var array: UInt32
+    var resv1: UInt32
+    var user_addr: UInt64
+
+    def __init__(out self):
+        self.head = 0
+        self.tail = 0
+        self.ring_mask = 0
+        self.ring_entries = 0
+        self.flags = 0
+        self.dropped = 0
+        self.array = 0
+        self.resv1 = 0
+        self.user_addr = 0
+
+struct CqRingOffsets(TrivialRegisterPassable):
+    var head: UInt32
+    var tail: UInt32
+    var ring_mask: UInt32
+    var ring_entries: UInt32
+    var overflow: UInt32
+    var cqes: UInt32
+    var flags: UInt32
+    var resv1: UInt32
+    var user_addr: UInt64
+
+    def __init__(out self):
+        self.head = 0
+        self.tail = 0
+        self.ring_mask = 0
+        self.ring_entries = 0
+        self.overflow = 0
+        self.cqes = 0
+        self.flags = 0
+        self.resv1 = 0
+        self.user_addr = 0
+
+struct IoUringParams(TrivialRegisterPassable):
+    var sq_entries: UInt32
+    var cq_entries: UInt32
+    var flags: UInt32
+    var sq_thread_cpu: UInt32
+    var sq_thread_idle: UInt32
+    var features: UInt32
+    var wq_fd: UInt32
+    var resv0: UInt32
+    var resv1: UInt32
+    var resv2: UInt32
+    var sq_off: SqRingOffsets
+    var cq_off: CqRingOffsets
+
+    def __init__(out self, sq_entries: UInt32 = 0, flags: UInt32 = 0):
+        self.sq_entries = sq_entries
+        self.cq_entries = 0
+        self.flags = flags
+        self.sq_thread_cpu = 0
+        self.sq_thread_idle = 0
+        self.features = 0
+        self.wq_fd = 0
+        self.resv0 = 0
+        self.resv1 = 0
+        self.resv2 = 0
+        self.sq_off = SqRingOffsets()
+        self.cq_off = CqRingOffsets()
+
+struct IoUringSqe(TrivialRegisterPassable):
+    var opcode: UInt8
+    var flags: UInt8
+    var ioprio: UInt16
+    var fd: Int32
+    var off: UInt64
+    var addr: UInt64
+    var len: UInt32
+    var op_flags: UInt32
+    var user_data: UInt64
+    var buf_index: UInt16
+    var personality: UInt16
+    var splice_fd_in: Int32
+    var addr3: UInt64
+    var pad: UInt64
+
+    def __init__(out self):
+        self.opcode = 0
+        self.flags = 0
+        self.ioprio = 0
+        self.fd = 0
+        self.off = 0
+        self.addr = 0
+        self.len = 0
+        self.op_flags = 0
+        self.user_data = 0
+        self.buf_index = 0
+        self.personality = 0
+        self.splice_fd_in = 0
+        self.addr3 = 0
+        self.pad = 0
+
+struct IoUringCqe(TrivialRegisterPassable):
+    var user_data: UInt64
+    var res: Int32
+    var flags: UInt32
+
+    def __init__(out self):
+        self.user_data = 0
+        self.res = 0
+        self.flags = 0
+
+comptime IORING_OFF_SQ_RING: Int = 0
+comptime IORING_OFF_CQ_RING: Int = 0x8000000
+comptime IORING_OFF_SQES: Int = 0x10000000
+
+comptime AT_FDCWD: Int = -100
+
+struct OpenFlags(TrivialRegisterPassable):
+    comptime RDONLY = 0
+    comptime WRONLY = 1
+    comptime RDWR = 2
+    comptime CREAT = 0o100
+    comptime EXCL = 0o200
+    comptime TRUNC = 0o1000
+    comptime APPEND = 0o2000
+    comptime NONBLOCK = 0o4000
+    comptime CLOEXEC = 0o2000000
+    comptime DIRECT = 0o40000
+
+struct IoUringFeat(TrivialRegisterPassable):
+    comptime SINGLE_MMAP = 1 << 0
+    comptime NODROP = 1 << 1
+    comptime SUBMIT_STABLE = 1 << 2
+    comptime RW_CUR_POS = 1 << 3
+    comptime CUR_PERSONALITY = 1 << 4
+    comptime FAST_POLL = 1 << 5
+    comptime POLL_32BITS = 1 << 6
+    comptime SQPOLL_NONFIXED = 1 << 7
+    comptime EXT_ARG = 1 << 8
+    comptime NATIVE_WORKERS = 1 << 9
+    comptime RSRC_TAGS = 1 << 10
+    comptime CQE_SKIP = 1 << 11
+    comptime LINKED_FILE = 1 << 12
+
+comptime FUTEX_BITSET_MATCH_ANY: Int = 0xFFFFFFFF
+
+struct TermIoctl(TrivialRegisterPassable):
+    comptime TCGETS = 0x5401
+    comptime TCSETS = 0x5402
+    comptime TIOCGWINSZ = 0x5413
+
+struct TermInputFlag(TrivialRegisterPassable):
+    comptime ICRNL = 0o400
+    comptime IXON = 0o2000
+
+struct TermLocalFlag(TrivialRegisterPassable):
+    comptime ISIG = 0o1
+    comptime ICANON = 0o2
+    comptime ECHO = 0o10
+    comptime IEXTEN = 0o100000
+
+struct TermControlChar(TrivialRegisterPassable):
+    comptime VTIME = 5
+    comptime VMIN = 6
+
+comptime TERMIOS_NCCS = 19
+
+struct Termios(Copyable, Movable):
+    var c_iflag: UInt32
+    var c_oflag: UInt32
+    var c_cflag: UInt32
+    var c_lflag: UInt32
+    var c_line: UInt8
+    var c_cc: InlineArray[UInt8, TERMIOS_NCCS]
+
+    def __init__(out self):
+        self.c_iflag = 0
+        self.c_oflag = 0
+        self.c_cflag = 0
+        self.c_lflag = 0
+        self.c_line = 0
+        self.c_cc = InlineArray[UInt8, TERMIOS_NCCS](fill=UInt8(0))
+
+struct Winsize(Copyable, Movable):
+    var ws_row: UInt16
+    var ws_col: UInt16
+    var ws_xpixel: UInt16
+    var ws_ypixel: UInt16
+
+    def __init__(out self):
+        self.ws_row = 0
+        self.ws_col = 0
+        self.ws_xpixel = 0
+        self.ws_ypixel = 0
+
+trait ArchLinux:
+    comptime NR_read: Int
+    comptime NR_write: Int
+    comptime NR_ioctl: Int
+    comptime NR_mmap: Int
+    comptime NR_mprotect: Int
+    comptime NR_munmap: Int
+    comptime NR_rt_sigaction: Int
+    comptime NR_sigaltstack: Int
+    comptime NR_exit: Int
+    comptime NR_getpid: Int
+    comptime NR_gettid: Int
+    comptime NR_getcpu: Int
+    comptime NR_sched_yield: Int
+    comptime NR_sched_setaffinity: Int
+    comptime NR_exit_group: Int
+    comptime NR_tgkill: Int
+    comptime NR_mbind: Int
+    comptime NR_openat: Int
+    comptime NR_close: Int
+    comptime NR_move_pages: Int
+    comptime NR_rseq: Int
+    comptime NR_madvise: Int
+    comptime NR_io_uring_setup: Int
+    comptime NR_io_uring_enter: Int
+    comptime NR_io_uring_register: Int
+    comptime NR_clone3: Int
+    comptime NR_futex_waitv: Int
+    comptime NR_futex_wake: Int
+    comptime NR_futex_wait: Int
+
+    def syscall[*Ts: Intable](self, nr: Int, *args: *Ts) -> Int: ...
+
+    def arch_cpu_relax(self): ...
+    def arch_thread_pointer(self) -> Int: ...
+    def arch_tls_load_i64[offset: Int](self) -> Int: ...
+
+    def sys_clone3_with_entry[origin: MutOrigin](
+        self,
+        clone_args_ptr: UnsafePointer[Clone3Args, origin],
+        clone_args_size: Int,
+    ) -> Int: ...
+
+    def sys_rt_sigaction[act_origin: MutOrigin](
+        self,
+        signum: Int,
+        act: UnsafePointer[RtSigAction, act_origin],
+        old: Optional[UnsafePointer[RtSigAction, MutAnyOrigin]] = None,
+    ) -> Int: ...
+
+    def arch_decode_sigsegv(self, siginfo: Int, ucontext: Int) -> SigSegvContext: ...
+
+
+trait LinuxSys(ArchLinux):
+
+    def sys_mmap[
+        prot: Int = Prot.RW,
+        flags: Int = MapFlag.PRIVATE | MapFlag.ANONYMOUS,
+    ](self, addr: Int, length: Int, fd: Int = -1, offset: Int = 0) -> Int:
+        return self.syscall(Self.NR_mmap, addr, length, prot, flags, fd, offset)
+
+    def sys_munmap(self, addr: Int, length: Int) -> Int:
+        return self.syscall(Self.NR_munmap, addr, length)
+
+    def sys_mbind[
+        policy: Int = Mempolicy.BIND,
+        flags: Int = 0,
+    ](self, addr: Int, length: Int, nodemask: UInt64, maxnode: Int = 64) -> Int:
+        var mask_storage: InlineArray[UInt64, 1] = [nodemask]
+        var mask_ptr = UnsafePointer(to=mask_storage)
+        var result = self.syscall(Self.NR_mbind, addr, length, policy, Int(mask_ptr), maxnode, flags)
+        _ = mask_ptr[]
+        return result
+
+    def sys_madvise[advice: Int](self, addr: Int, length: Int) -> Int:
+        return self.syscall(Self.NR_madvise, addr, length, advice)
+
+    def sys_move_pages_query(self, addr: Int) -> Int:
+        var pages: InlineArray[Int, 1] = [addr]
+        var status: InlineArray[Int32, 1] = [Int32(-1)]
+        var pages_ptr = UnsafePointer(to=pages)
+        var status_ptr = UnsafePointer(to=status)
+        var result = self.syscall(Self.NR_move_pages, 0, 1, Int(pages_ptr), 0, Int(status_ptr), 0)
+        _ = pages_ptr[]
+        _ = status_ptr[]
+        if result < 0:
+            return result
+        return Int(status[0])
+
+    def sys_mprotect(self, addr: Int, length: Int, prot: Int) -> Int:
+        return self.syscall(Self.NR_mprotect, addr, length, prot)
+
+    def sys_openat(self, dirfd: Int, mut pathname: String, flags: Int, mode: Int = 0) -> Int:
+        var cstr = pathname.as_c_string_slice()
+        return self.syscall(Self.NR_openat, dirfd, Int(cstr.unsafe_ptr()), flags, mode)
+
+    def sys_close(self, fd: Int) -> Int:
+        return self.syscall(Self.NR_close, fd)
+
+    def sys_read(self, fd: Int, buf: Int, count: Int) -> Int:
+        return self.syscall(Self.NR_read, fd, buf, count)
+
+    def sys_ioctl(self, fd: Int, request: Int, arg: Int) -> Int:
+        return self.syscall(Self.NR_ioctl, fd, request, arg)
+
+    def sys_tcgetattr[origin: MutOrigin](self, fd: Int, t: UnsafePointer[Termios, origin]) -> Int:
+        return self.sys_ioctl(fd, TermIoctl.TCGETS, Int(t))
+
+    def sys_tcsetattr[origin: MutOrigin](self, fd: Int, t: UnsafePointer[Termios, origin]) -> Int:
+        return self.sys_ioctl(fd, TermIoctl.TCSETS, Int(t))
+
+    def sys_get_winsize[origin: MutOrigin](self, fd: Int, w: UnsafePointer[Winsize, origin]) -> Int:
+        return self.sys_ioctl(fd, TermIoctl.TIOCGWINSZ, Int(w))
+
+    def sys_sigaltstack[ss_origin: MutOrigin](
+        self,
+        ss: UnsafePointer[StackT, ss_origin],
+        old: Optional[UnsafePointer[StackT, MutAnyOrigin]] = None,
+    ) -> Int:
+        return self.syscall(Self.NR_sigaltstack, Int(ss),
+                            Int(old.value()) if old else 0)
+
+    def sys_futex_wait(self, addr: Int, expected: Int, flags: Int = Futex2.SIZE_U32 | Futex2.PRIVATE) -> Int:
+        return self.syscall(Self.NR_futex_wait, addr, expected, FUTEX_BITSET_MATCH_ANY, flags, 0, 0)
+
+    def sys_futex_wake(self, addr: Int, nr_wake: Int = 1, flags: Int = Futex2.SIZE_U32 | Futex2.PRIVATE) -> Int:
+        return self.syscall(Self.NR_futex_wake, addr, FUTEX_BITSET_MATCH_ANY, nr_wake, flags)
+
+    def sys_exit(self, code: Int = 0):
+        _ = self.syscall(Self.NR_exit, code)
+
+    def sys_exit_group(self, code: Int = 0):
+        _ = self.syscall(Self.NR_exit_group, code)
+
+    def sys_getpid(self) -> Int:
+        return self.syscall(Self.NR_getpid)
+
+    def sys_gettid(self) -> Int:
+        return self.syscall(Self.NR_gettid)
+
+    def sys_getcpu(self) -> Tuple[Int, Int]:
+        var cpu = UInt32(0)
+        var node = UInt32(0)
+        var cpu_addr = Int(UnsafePointer(to=cpu))
+        var node_addr = Int(UnsafePointer(to=node))
+        _ = self.syscall(Self.NR_getcpu, cpu_addr, node_addr, 0)
+        return Tuple[Int, Int](Int(cpu), Int(node))
+
+    def sys_tgkill(self, pid: Int, tid: Int, sig: Int) -> Int:
+        return self.syscall(Self.NR_tgkill, pid, tid, sig)
+
+    def sys_sched_yield(self):
+        _ = self.syscall(Self.NR_sched_yield)
+
+    def sys_sched_setaffinity(self, tid: Int, mask_size: Int, mask_ptr: Int) -> Int:
+        return self.syscall(Self.NR_sched_setaffinity, tid, mask_size, mask_ptr)
+
+    def sys_io_uring_setup(self, entries: UInt32, params: UnsafePointer[IoUringParams, _]) -> Int:
+        return self.syscall(Self.NR_io_uring_setup, Int(entries), Int(params))
+
+    def sys_io_uring_enter(
+        self,
+        fd: Int,
+        to_submit: UInt32,
+        min_complete: UInt32,
+        flags: UInt32,
+        sig: Int = 0,
+        sigsz: Int = 0,
+    ) -> Int:
+        return self.syscall(
+            Self.NR_io_uring_enter,
+            fd, Int(to_submit), Int(min_complete), Int(flags), sig, sigsz,
+        )
+
+    def sys_io_uring_register(
+        self,
+        fd: Int,
+        opcode: UInt32,
+        arg: Int,
+        nr_args: UInt32,
+    ) -> Int:
+        return self.syscall(
+            Self.NR_io_uring_register,
+            fd, Int(opcode), arg, Int(nr_args),
+        )

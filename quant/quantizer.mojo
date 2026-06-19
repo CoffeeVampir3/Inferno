@@ -19,6 +19,7 @@ from safetensors.parser import (
 from safetensors.writer import OutputEntry, build_header
 from modeling.loader import discover_shards
 from modeling.slot import SlotLike, SlotGroup
+from modeling.model_spec import Replicated, Encoding, ShapeLike
 
 from butterquant.kernels import (
     apply_gamma_in_place, gamma_sqrt_abs_in_place,
@@ -26,7 +27,7 @@ from butterquant.kernels import (
 )
 
 from quant.recipe import (
-    Passthrough, PerRowQuant, PerBlockQuant, RouterCenter,
+    QuantRecipe, Passthrough, PerRowQuant, PerBlockQuant, RouterCenter,
     SoftmaxRouterCenter, SplitGamma, AbsorbedGamma, TwoSided,
     GammaMode, RotationMode,
 )
@@ -464,8 +465,12 @@ struct Quantizer(Movable):
         comptime for i in range(reflect[T].field_count()):
             comptime FT = reflect[T].field_types()[i]
             comptime if conforms_to(FT, SlotLike):
-                comptime if FT.NAME:
-                    if not self.plan_slot[FT](prefix, layer_idx):
+                comptime if FT.SOURCE.group_count == 1:
+                    comptime if FT.NAME:
+                        if not self.plan_slot[FT](prefix, layer_idx):
+                            return False
+                comptime if FT.SOURCE.group_count != 1:
+                    if not self.plan_group[FT](prefix, layer_idx):
                         return False
             comptime if conforms_to(FT, SlotGroup):
                 if not self.plan_walk[FT](prefix, layer_idx):
@@ -473,12 +478,31 @@ struct Quantizer(Movable):
         return True
 
     def plan_slot[FT: SlotLike](mut self, prefix: String, layer_idx: Int) -> Bool:
-        comptime ROWS = FT.SHAPE.SIZE_ON_DISK_N
-        comptime COLS = FT.SHAPE.SIZE_ON_DISK_M
-        comptime SRC = FT.ENCODING.DTYPE
-        comptime QV = FT.QUANT
+        return self.plan_one[FT.ENCODING, FT.SHAPE, FT.QUANT](
+            prefix + String(FT.NAME.value()), String(FT.NAME.value()),
+            prefix, layer_idx)
 
-        var full = prefix + String(FT.NAME.value())
+    def plan_group[FT: SlotLike](mut self, prefix: String, layer_idx: Int) -> Bool:
+        comptime per_elem_rows = FT.SHAPE.SIZE_ON_DISK_N // FT.SOURCE.group_count
+        comptime ElementShape = Replicated[per_elem_rows, FT.SHAPE.SIZE_ON_DISK_M]
+        var names = List[String]()
+        FT.SOURCE.gen(prefix, names)
+        for e in range(len(names)):
+            if not self.plan_one[FT.ENCODING, ElementShape, FT.QUANT](
+                names[e], names[e], prefix, layer_idx):
+                return False
+        return True
+
+    def plan_one[
+        encoding: Encoding, shape: ShapeLike, quant: QuantRecipe,
+    ](
+        mut self, full: String, local: String, prefix: String, layer_idx: Int,
+    ) -> Bool:
+        comptime ROWS = shape.SIZE_ON_DISK_N
+        comptime COLS = shape.SIZE_ON_DISK_M
+        comptime SRC = encoding.DTYPE
+        comptime QV = quant
+
         var loc_opt = find_tensor(full, as_mut_any_span(self.headers))
         if not loc_opt:
             print(t"quant plan: missing {full}")
@@ -494,10 +518,8 @@ struct Quantizer(Movable):
             print(t"quant plan: shape mismatch for {full}: got {lr}x{lc} expected {ROWS}x{COLS}")
             return False
 
-        var local = String(FT.NAME.value())
-
         var offs = InlineArray[Int, 5](fill=-1)
-        comptime MANIFEST = quant_manifest[FT.ENCODING, FT.SHAPE, FT.QUANT](1)
+        comptime MANIFEST = quant_manifest[encoding, shape, quant](1)
         comptime for i in range(MANIFEST.count):
             comptime MEMBER = MANIFEST.members[i]
             comptime if MEMBER.role != QuantRole.COLSUM:

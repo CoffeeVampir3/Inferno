@@ -33,11 +33,16 @@ from modeling.modeling_common import (
     Repeated, ArenaLayout,
 )
 from modeling.slot import (
-    Slot, SlotGroup, BindContext, stamp_offsets, emit_descs,
+    Slot, SlotGroup, SourceSpec, BindContext, stamp_offsets, emit_descs,
 )
 from modeling.gemma4_topology import KVSlotGroup
 from modeling.loader import discover_shards, load_weights_from_descs
-from quant.recipe import QuantRecipe, Passthrough
+from quant.recipe import (
+    QuantRecipe, Passthrough, PerRowQuant, PerBlockQuant, RouterCenter,
+    SplitGamma, NoGamma, SingleSided, PerRowCs, PerBlockCs, NoColsum,
+    VnniPacked, RowMajor,
+)
+from quant.quantizer import Quantizer
 from continuous_batching.schedule import (
     Schedule, ScheduledModel, MAXIMUM_SAMPLING_LOGITS,
 )
@@ -122,9 +127,6 @@ comptime LAYER_SCHEDULE = build_layer_schedule()
 comptime MAX_WORKERS = 128
 comptime PAGE_LEN = 256
 comptime CONTINUOUS_BATCHING_MAX_SEQ_PARALLELISM = 32
-comptime FULL_POOL = 0
-comptime INDEX_POOL = 1
-
 
 trait MinimaxM3Recipes:
     comptime Qkv: QuantRecipe
@@ -156,7 +158,54 @@ struct PassthroughRecipes(MinimaxM3Recipes):
     comptime LmHead: QuantRecipe = Passthrough()
 
 
+comptime SplitGainPerRowCs[fwht: Int, gamma: StaticString]: QuantRecipe = PerRowQuant(
+    fwht, SplitGamma(gamma), SingleSided(), PerRowCs(), VnniPacked(),
+)
+
+
+comptime PlainPerBlockCs[fwht: Int]: QuantRecipe = PerRowQuant(
+    fwht, NoGamma(), SingleSided(), PerBlockCs(), VnniPacked(),
+)
+
+
+comptime HeadEmbed[fwht: Int]: QuantRecipe = PerBlockQuant(
+    fwht, NoGamma(), SingleSided(), NoColsum(), RowMajor(),
+)
+
+
+struct ButterquantRecipes(MinimaxM3Recipes):
+    comptime Qkv: QuantRecipe = SplitGainPerRowCs[128, "input_layernorm.weight"]
+    comptime Out: QuantRecipe = PlainPerBlockCs[C.HEAD_DIM]
+    comptime IndexProj: QuantRecipe = Passthrough()
+    comptime DenseGateUp: QuantRecipe = SplitGainPerRowCs[
+        128, "post_attention_layernorm.weight"]
+    comptime DenseDown: QuantRecipe = PlainPerBlockCs[128]
+    comptime Router: QuantRecipe = RouterCenter(
+        "block_sparse_moe.e_score_correction_bias")
+    comptime MoeGateUp: QuantRecipe = SplitGainPerRowCs[
+        128, "post_attention_layernorm.weight"]
+    comptime MoeDown: QuantRecipe = PlainPerBlockCs[128]
+    comptime SharedGateUp: QuantRecipe = SplitGainPerRowCs[
+        128, "post_attention_layernorm.weight"]
+    comptime SharedDown: QuantRecipe = PlainPerBlockCs[128]
+    comptime Embed: QuantRecipe = Passthrough()
+    comptime LmHead: QuantRecipe = HeadEmbed[128]
+
+
 comptime R = PassthroughRecipes
+
+
+def gen_gate_up[num_experts: Int](prefix: String, mut names: List[String]):
+    for e in range(num_experts):
+        var ep = prefix + String(t"block_sparse_moe.experts.{e}.")
+        names.append(ep + "w1.weight")
+        names.append(ep + "w3.weight")
+
+
+def gen_down[num_experts: Int](prefix: String, mut names: List[String]):
+    for e in range(num_experts):
+        var ep = prefix + String(t"block_sparse_moe.experts.{e}.")
+        names.append(ep + "w2.weight")
 
 
 struct MinimaxM3Shapes:
@@ -217,8 +266,16 @@ struct MoeRefs[R: MinimaxM3Recipes](Copyable, ImplicitlyCopyable, SlotGroup):
     comptime S = MinimaxM3Shapes
     var router_gate: Slot[F32, Self.S.RouterProj, "block_sparse_moe.gate.weight", Self.R.Router]
     var router_bias: Slot[F32, Shape[C.NUM_EXPERTS, 1], "block_sparse_moe.e_score_correction_bias"]
-    var experts_gate_up: Slot[BF16, Self.S.ExpertsGateUp, quant=Self.R.MoeGateUp]
-    var experts_down:    Slot[BF16, Self.S.ExpertsDown,   quant=Self.R.MoeDown]
+    var experts_gate_up: Slot[
+        BF16, Self.S.ExpertsGateUp,
+        SourceSpec.grouped(2 * C.NUM_EXPERTS, gen_gate_up[C.NUM_EXPERTS]),
+        quant=Self.R.MoeGateUp,
+    ]
+    var experts_down: Slot[
+        BF16, Self.S.ExpertsDown,
+        SourceSpec.grouped(C.NUM_EXPERTS, gen_down[C.NUM_EXPERTS]),
+        quant=Self.R.MoeDown,
+    ]
     var shared_gate: Slot[BF16, Self.S.SharedGateUp, "block_sparse_moe.shared_experts.gate_proj.weight", Self.R.SharedGateUp]
     var shared_up:   Slot[BF16, Self.S.SharedGateUp, "block_sparse_moe.shared_experts.up_proj.weight", Self.R.SharedGateUp]
     var shared_down: Slot[BF16, Self.S.SharedDown,   "block_sparse_moe.shared_experts.down_proj.weight", Self.R.SharedDown]
@@ -296,37 +353,6 @@ def degree_contracts_ok(degree: Int) -> Bool:
     )
 
 
-def emit_m3_expert_descs(
-    prefix: String,
-    gate_up_off: Int,
-    down_off: Int,
-    degree: Int,
-    mut descs: List[WeightDesc],
-):
-    var epr = C.NUM_EXPERTS // degree
-    comptime elt = BF16.ELEMENT_BYTES
-    comptime gate_up_bytes = C.MOE_GATE_UP_FUSED * C.HIDDEN * elt
-    comptime up_half = C.MOE_INTERMEDIATE * C.HIDDEN * elt
-    comptime down_bytes = C.HIDDEN * C.MOE_INTERMEDIATE * elt
-    for e in range(C.NUM_EXPERTS):
-        var rr = e // epr
-        var e_local = e - rr * epr
-        var gu = gate_up_off + e_local * gate_up_bytes
-        var ep = prefix + String(t"block_sparse_moe.experts.{e}.")
-        descs.append(WeightDesc(
-            ep + "w1.weight", gu, BF16.DTYPE, elt,
-            C.MOE_INTERMEDIATE, C.HIDDEN, C.HIDDEN,
-            C.MOE_INTERMEDIATE, C.HIDDEN, rr))
-        descs.append(WeightDesc(
-            ep + "w3.weight", gu + up_half, BF16.DTYPE, elt,
-            C.MOE_INTERMEDIATE, C.HIDDEN, C.HIDDEN,
-            C.MOE_INTERMEDIATE, C.HIDDEN, rr))
-        descs.append(WeightDesc(
-            ep + "w2.weight", down_off + e_local * down_bytes, BF16.DTYPE, elt,
-            C.HIDDEN, C.MOE_INTERMEDIATE, C.MOE_INTERMEDIATE,
-            C.HIDDEN, C.MOE_INTERMEDIATE, rr))
-
-
 def build_minimax_m3_plan[
     R: MinimaxM3Recipes, FKV: KVSlotGroup, IKV: KVSlotGroup,
     max_seq_len: Int, batching_seq_len: Int,
@@ -355,11 +381,6 @@ def build_minimax_m3_plan[
         else:
             var region_base = sl_off + entry.local_idx * sl_stride
             _ = emit_descs[SparseLayerRefs[R]](prefix, region_base, degree, descs)
-            emit_m3_expert_descs(
-                prefix,
-                region_base + sl_proto.moe.experts_gate_up.get_offset(),
-                region_base + sl_proto.moe.experts_down.get_offset(),
-                degree, descs)
 
     var tail_proto = TailRefs[R]()
     var tail_bytes = stamp_offsets(tail_proto, degree)
@@ -810,6 +831,45 @@ struct MinimaxM3[
                 self.layout.index_rope.sin.at(base),
                 C.ROPE_THETA)
 
+    def quant_model_init(mut self):
+        """Post-load init for a ButterquantRecipes checkpoint. The bf16 path
+        needs none of this (model_init covers RoPE); these are the steps a
+        quantized load must run after weights land in the arena and before the
+        first forward.
+
+        1. Split-gain (butterquant §4.2/§4.4). Each SplitGamma weight pairs an
+           offline weight-side factor sqrt(|gamma|) (baked into W by the
+           quantizer) with an activation-side factor sigma = sign(gamma) *
+           sqrt(|gamma|), epsilon-floored on the activation side only. gamma is
+           the gemma (1 + w) gain, so sigma is formed from (1 + w), NOT the
+           stored w; the offline get_gamma must apply the same (1 + w) or the two
+           halves do not multiply back to gamma. This (1 + w) offset is the one
+           correctness item flagged when wiring the recipes.
+
+           MiniMax cannot reuse gemma's in-place norm bake. Both split norms also
+           feed a non-split consumer: input_layernorm feeds the Passthrough
+           indexer in addition to Qkv, and post_attention_layernorm feeds the
+           gauged router in addition to the experts. Those consumers need the
+           full gain (1 + w) * x / rms, so sigma must be applied at the split
+           weight's activation prep, leaving the shared norm weight at (1 + w)
+           for the full-gain consumers -- it is not folded into the norm weight.
+
+        2. Colsum (butterquant §2.5). PerRowCs / PerBlockCs reserve a colsum
+           member in the arena that the loader never fills. Compute it from the
+           loaded int8 weights here: cs[n] = sum_k W_i8[n, k] (per-row) or
+           cs[n, b] (per-block), per-expert for the grouped MoE / shared weights.
+           NoColsum slots (LmHead) skip this.
+
+        3. Router (butterquant §13.2/§13.4). RouterCenter weights are centered
+           bf16 plus a bf16 gauge plus an f32 bias. The gauge pivot
+           p = sum_k x_k g[k] is per-token (runtime), so init only confirms the
+           gauge and bias sidecars resolved at their slot offsets.
+
+        4. Shared with model_init: RoPE tables (main + index) and the floating
+           point environment priming the quant kernels assume.
+        """
+        abort("minimax_m3: quant_model_init not implemented")
+
     def batch_geometry(self) -> BatchGeometry:
         abort("minimax_m3: batch_geometry not implemented (index KV pool spec pending)")
 
@@ -862,6 +922,29 @@ struct MinimaxM3[
             arenas^, pools^, layout_opt.take(), degree, max_workers)
         model.model_init()
         return model^
+
+    @staticmethod
+    def quantize[Rec: MinimaxM3Recipes = R](
+        source_dir: Path, output_path: Path,
+        topo: NumaTopology, var pools: List[Self.Pool],
+    ) -> Bool:
+        var q = Quantizer(source_dir, output_path)
+        if not q:
+            return False
+        for i in range(C.NUM_LAYERS):
+            var entry = LAYER_SCHEDULE[i]
+            var prefix = String(t"language_model.model.layers.{entry.idx}.")
+            if entry.kind == LayerKind.DENSE:
+                if not q.plan_walk[DenseLayerRefs[Rec]](prefix, entry.idx):
+                    return False
+            else:
+                if not q.plan_walk[SparseLayerRefs[Rec]](prefix, entry.idx):
+                    return False
+        if not q.plan_walk[TailRefs[Rec]](String(""), -1):
+            return False
+        if not q.write_header():
+            return False
+        return q.execute(topo, pools^)
 
     def check_weights(self):
         var base = self.arena_bases[0]

@@ -3,7 +3,7 @@ from std.reflection import reflect
 
 from kernels.helpers import RankView, Binding
 from modeling.model_spec import (
-    Encoding, ShapeLike, WeightDesc,
+    Encoding, ShapeLike, WeightDesc, Replicated,
     DISTRIBUTED, align_up,
 )
 from modeling.utilities import FieldwiseDefault
@@ -22,9 +22,35 @@ from butterquant.pack import PackColsumTask
 from butterquant.vnni import VNNI_N_STEP, VNNI_K_STEP, COLSUM_NARROW_WIDTH
 
 
+def noop_name_gen(prefix: String, mut names: List[String]):
+    pass
+
+
+@fieldwise_init
+struct SourceSpec(Copyable, Movable, ImplicitlyCopyable):
+    var name: StaticString
+    var group_count: Int
+    var gen: def(String, mut List[String]) thin -> None
+
+    @implicit
+    def __init__(out self, name: StaticString):
+        self = Self(name, 1, noop_name_gen)
+
+    @implicit
+    def __init__(out self, lit: StringLiteral):
+        self = Self(StaticString(lit), 1, noop_name_gen)
+
+    @staticmethod
+    def grouped(
+        count: Int, gen: def(String, mut List[String]) thin -> None,
+    ) -> Self:
+        return Self("", count, gen)
+
+
 trait SlotLike:
     comptime ENCODING: Encoding
     comptime SHAPE: ShapeLike
+    comptime SOURCE: SourceSpec
     comptime NAME: Optional[StaticString]
     comptime TARGET_RANK: Int
     comptime QUANT: QuantRecipe
@@ -72,14 +98,15 @@ struct BindContext[o: ImmutOrigin](Copyable, ImplicitlyCopyable):
 
 
 struct Slot[
-    encoding: Encoding, shape: ShapeLike, name: StaticString = "",
+    encoding: Encoding, shape: ShapeLike, source: SourceSpec = SourceSpec(""),
     quant: QuantRecipe = Passthrough(),
     target_rank: Int = DISTRIBUTED,
 ](SlotLike, Defaultable, Copyable, ImplicitlyCopyable):
     comptime ENCODING = Self.encoding
     comptime SHAPE = Self.shape
-    comptime NAME = Optional[StaticString](None) if Self.name == StaticString(
-        "") else Optional[StaticString](Self.name)
+    comptime SOURCE = Self.source
+    comptime NAME = Optional[StaticString](None) if Self.source.name == StaticString(
+        "") else Optional[StaticString](Self.source.name)
     comptime TARGET_RANK = Self.target_rank
     comptime QUANT = Self.quant
 
@@ -186,18 +213,12 @@ def slot_arena_bytes[
 
 
 @always_inline
-def emit_quant_descs[
+def emit_member_descs[
     encoding: Encoding, shape: ShapeLike, quant: QuantRecipe,
-    name: StaticString, target_rank: Int,
 ](
-    prefix: String, slot_arena_off: Int, degree: Int, mut ops: List[WeightDesc],
+    full: String, slot_arena_off: Int, target_rank: Int, degree: Int,
+    mut ops: List[WeightDesc],
 ):
-    """Emit one WeightDesc per physical tensor in this slot's encoding, driven
-    by the shared manifest at runtime `degree`: the weight at slot_arena_off,
-    then sidecars packed tightly after at their manifest rel_offs. The colsum
-    member is reserved in the arena but computed at model init, so it is never
-    read from the checkpoint and emits no loader desc."""
-    var full = prefix + String(name)
     var manifest = quant_manifest[encoding, shape, quant](degree)
     for i in range(manifest.count):
         var member = manifest.members[i]
@@ -210,6 +231,48 @@ def emit_quant_descs[
                 local_cols=member.local_cols,
                 data_rows=member.data_rows, data_cols=member.data_cols,
                 target_rank=target_rank,
+            ))
+
+
+@always_inline
+def emit_quant_descs[
+    encoding: Encoding, shape: ShapeLike, quant: QuantRecipe,
+    name: StaticString, target_rank: Int,
+](
+    prefix: String, slot_arena_off: Int, degree: Int, mut ops: List[WeightDesc],
+):
+    emit_member_descs[encoding, shape, quant](
+        prefix + String(name), slot_arena_off, target_rank, degree, ops)
+
+
+@always_inline
+def emit_group[
+    encoding: Encoding, shape: ShapeLike, quant: QuantRecipe, count: Int,
+](
+    names: List[String], region_off: Int, degree: Int, mut ops: List[WeightDesc],
+):
+    comptime per_elem_rows = shape.SIZE_ON_DISK_N // count
+    comptime ElementShape = Replicated[per_elem_rows, shape.SIZE_ON_DISK_M]
+    var whole = quant_manifest[encoding, shape, quant](degree)
+    var elem = quant_manifest[encoding, ElementShape, quant](1)
+    var per_rank = count // degree
+    for mi in range(elem.count):
+        var em = elem.members[mi]
+        if em.role == QuantRole.COLSUM:
+            continue
+        var member_base = whole.members[mi].rel_off
+        var stride = em.data_rows * em.data_cols * em.element_bytes
+        for e in range(len(names)):
+            var rank = e // per_rank
+            var local = e % per_rank
+            ops.append(WeightDesc(
+                name=names[e] + String(em.suffix),
+                arena_offset=region_off + member_base + local * stride,
+                dtype=em.dtype, element_bytes=em.element_bytes,
+                global_rows=em.global_rows, global_cols=em.global_cols,
+                local_cols=em.local_cols,
+                data_rows=em.data_rows, data_cols=em.data_cols,
+                target_rank=rank,
             ))
 
 
@@ -248,11 +311,18 @@ def emit_descs[T: AnyType](
     comptime for i in range(reflect[T].field_count()):
         comptime FT = reflect[T].field_types()[i]
         comptime if conforms_to(FT, SlotLike):
-            comptime if FT.NAME:
-                emit_quant_descs[
-                    FT.ENCODING, FT.SHAPE, FT.QUANT,
-                    FT.NAME.value(), FT.TARGET_RANK,
-                ](prefix, region_base + off, degree, ops)
+            comptime if FT.SOURCE.group_count == 1:
+                comptime if FT.NAME:
+                    emit_quant_descs[
+                        FT.ENCODING, FT.SHAPE, FT.QUANT,
+                        FT.NAME.value(), FT.TARGET_RANK,
+                    ](prefix, region_base + off, degree, ops)
+            comptime if FT.SOURCE.group_count != 1:
+                var names = List[String]()
+                FT.SOURCE.gen(prefix, names)
+                emit_group[
+                    FT.ENCODING, FT.SHAPE, FT.QUANT, FT.SOURCE.group_count,
+                ](names, region_base + off, degree, ops)
             off = align_up(off + slot_arena_bytes[
                 FT.ENCODING, FT.SHAPE, FT.QUANT,
             ](degree))

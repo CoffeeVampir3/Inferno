@@ -644,13 +644,12 @@ def attn_qkv_project_norm_rope[
     mut pools: List[P],
     mut prof: Profiler[Profile, N],
 ):
-    """Shared front of every M3 attention (dense and sparse): project Q/K/V,
-    per-head q/k RMS-norm (V is passed through unnormalized), then RoPE + write
-    K/V to the round-robin context-sharded cache."""
     var degree = ctx.degree()
     comptime head_dim = C.HEAD_DIM
     comptime sqrt_hd = sqrt[DType.float32, 1](head_dim)
     comptime hd_eps = Float32(head_dim) * C.RMS_NORM_EPS
+    comptime attn_scale = Float32(1.0) / sqrt_hd
+    comptime q_norm_sqrt_n = sqrt_hd * attn_scale
     comptime num_q_heads = C.NUM_HEADS
     comptime num_kv_heads = C.NUM_KV_HEADS
 
@@ -661,10 +660,8 @@ def attn_qkv_project_norm_rope[
     dispatch_gemm[cols=C.HIDDEN, max_worker_count=max_worker_count](
         xs, attn.v_proj.binding(attn_ctx), v_outs, C.KV_DIM, seq_len, pools, prof)
 
-    # Per-head q/k RMS-norm with the baked (1 + w) gemma gain. V is NOT
-    # normalized, so the fused qkv-heads kernel (which RMS-scales V) is avoided.
     dispatch_rms_norm[
-        hidden=head_dim, sqrt_n=sqrt_hd, n_eps=hd_eps,
+        hidden=head_dim, sqrt_n=q_norm_sqrt_n, n_eps=hd_eps,
         max_worker_count=max_worker_count,
     ](q_outs, q_outs, attn.q_norm.binding(attn_ctx),
       seq_len * num_q_heads, pools, prof)
@@ -679,7 +676,7 @@ def attn_qkv_project_norm_rope[
     var row_mask = rows_per_page - 1
 
     dispatch_rope_cache_write[
-        half=C.ROPE_HALF, pair_stride=head_dim // 2, head_dim=head_dim,
+        half=C.ROPE_HALF, pair_stride=C.ROPE_HALF, head_dim=head_dim,
         max_worker_count=max_worker_count,
     ](q_outs, k_outs, v_outs, k_kv, v_kv, cos, sin,
       runs, num_q_heads, num_kv_heads, degree,
@@ -767,9 +764,6 @@ def dispatch_lightning_indexer[
     mut pools: List[P],
     mut prof: Profiler[Profile, N],
 ):
-    """Lightning indexer: project / norm / RoPE-cache index Q,K then score the
-    queries against the cached index-K history to pick the top-k blocks per
-    KV-head. Selected block ids land in the `block_idx` scratch."""
     comptime SC = MinimaxM3MsaScratch[batching_seq_len]
     var degree = ctx.degree()
     comptime ihd = C.INDEX_HEAD_DIM
@@ -788,7 +782,6 @@ def dispatch_lightning_indexer[
     var index_scores = scratch.binding[SC, "index_scores"](ctx, plan)
     var block_idx = scratch.binding[SC, "block_idx"](ctx, plan)
 
-    # Project index Q (4 heads) and index K (1 shared head); both replicated.
     dispatch_gemm[cols=C.HIDDEN, max_worker_count=max_worker_count](
         x_in, indexer.index_q_proj.binding(idx_ctx), index_q,
         C.INDEX_Q_DIM, seq_len, pools, prof)
@@ -796,7 +789,6 @@ def dispatch_lightning_indexer[
         x_in, indexer.index_k_proj.binding(idx_ctx), index_k,
         C.INDEX_K_DIM, seq_len, pools, prof)
 
-    # Per-head RMS-norm (baked (1 + w) gain); no value path.
     dispatch_rms_norm[
         hidden=ihd, sqrt_n=sqrt_ihd, n_eps=ihd_eps,
         max_worker_count=max_worker_count,
@@ -808,14 +800,11 @@ def dispatch_lightning_indexer[
     ](index_k, index_k, indexer.index_k_norm.binding(idx_ctx),
       seq_len, pools, prof)
 
-    # RoPE + write index-K to the round-robin index cache. Reuses main_rope
-    # (half=32 => 64-dim partial rotation over the 128-dim index heads), per the
-    # reference's cos[..., :head_dim] on a 64-wide table -- VERIFY numerically.
     var rows_per_page = PAGE_LEN // degree
     var page_shift = pow2_shift(rows_per_page)
     var row_mask = rows_per_page - 1
     dispatch_rope_k_cache_write[
-        half=C.ROPE_HALF, pair_stride=ihd // 2, head_dim=ihd,
+        half=C.ROPE_HALF, pair_stride=C.ROPE_HALF, head_dim=ihd,
         max_worker_count=max_worker_count,
     ](index_q, index_k, index_k_cache,
       layout.main_rope.cos.state_binding(ctx),
@@ -823,7 +812,6 @@ def dispatch_lightning_indexer[
       index_runs, num_index_heads, 1, degree,
       page_shift, row_mask, -1, seq_len, pools, prof)
 
-    # Score queries vs cached index-K, max-pool to blocks, top-k select.
     dispatch_minimax_m3_indexer[
         page_len=PAGE_LEN, max_worker_count=max_worker_count,
     ](index_q, index_k_cache, block_idx, index_scores, index_runs, seq_len,
@@ -852,8 +840,6 @@ def dispatch_msa_attention_qkv[
     mut pools: List[P],
     mut prof: Profiler[Profile, N],
 ):
-    """Sparse-layer attention (layers 3-59): main Q/K/V into the full cache,
-    lightning-indexer block selection, then block-sparse flash over the cache."""
     comptime SC = MinimaxM3MsaScratch[batching_seq_len]
     var degree = ctx.degree()
     comptime head_dim = C.HEAD_DIM
@@ -870,14 +856,12 @@ def dispatch_msa_attention_qkv[
     var v_outs = k_outs.shifted(seq_len * C.KV_DIM)
     var xs = layout.activations.x_residual.state_binding(ctx)
 
-    # Main Q/K/V projection + qk-norm + RoPE write into the full KV cache.
     attn_qkv_project_norm_rope[max_worker_count=max_worker_count](
         ctx, attn_ctx, attn, xs, q_outs, k_outs, v_outs, k_kv, v_kv,
         layout.main_rope.cos.state_binding(ctx),
         layout.main_rope.sin.state_binding(ctx),
         runs, seq_len, pools, prof)
 
-    # Lightning indexer -> per-head selected blocks.
     dispatch_lightning_indexer[
         max_seq_len=max_seq_len, batching_seq_len=batching_seq_len,
         max_worker_count=max_worker_count,
@@ -888,7 +872,6 @@ def dispatch_msa_attention_qkv[
     var partials = scratch.binding[SC, "partials"](ctx, plan)
     var merge_segments = scratch.binding[SC, "merge_segments"](ctx, plan)
 
-    # Block-sparse flash over the full KV cache using the selected blocks.
     dispatch_minimax_m3_sparse_attention[
         page_len=PAGE_LEN, max_worker_count=max_worker_count,
     ](q_outs, k_kv, v_kv, block_idx, q_local, partials, merge_segments,
@@ -928,9 +911,6 @@ def dispatch_dense_mlp[
     mut pools: List[P],
     mut prof: Profiler[Profile, N],
 ):
-    """Dense SwiGLU-OAI MLP (layers 0-2). `x_in` is the post_attn-normed input;
-    the result lands in the `dense_out` scratch buffer for the caller to add to
-    the residual stream."""
     var degree = ctx.degree()
     var intermediate_per_rank = MinimaxM3Shapes.DenseGateUp.data_n(degree)
 
@@ -966,10 +946,6 @@ def dispatch_m3_router[
     mut pools: List[P],
     mut prof: Profiler[Profile, N],
 ):
-    """Sigmoid + correction-bias router. `x_input` is the post_attn-normed
-    activations (shared with the experts). Writes top-k route_idx/route_w into
-    the MoE scratch; the routed (x2.0) scaling and renormalization happen inside
-    the prototype router."""
     var degree = ctx.degree()
     var experts_per_rank = C.NUM_EXPERTS // degree
     var cands = scratch.binding[MinimaxM3MoeScratch, "cands"](ctx, plan)
@@ -998,11 +974,6 @@ def dispatch_moe[
     mut pools: List[P],
     mut prof: Profiler[Profile, N],
 ):
-    """Routed experts + shared expert. Assumes `dispatch_m3_router` already
-    populated route_idx/route_w in the same scratch plan this layer.
-    `x_input` is the (single) post_attn-normed activation, shared by router,
-    routed experts, and the shared expert. Result (routed x2.0 + shared) lands
-    in `moe_out`."""
     var degree = ctx.degree()
     var experts_per_rank = C.NUM_EXPERTS // degree
     var shared_inter_per_rank = MinimaxM3Shapes.SharedGateUp.data_n(degree)
@@ -1038,7 +1009,6 @@ def dispatch_moe[
     dispatch_allreduce_inplace[BF16, max_worker_count=max_worker_count](
         moe_out, seq_len * C.HIDDEN, pools, prof)
 
-    # Shared expert (always-on); added unscaled to the routed output.
     dispatch_gemm[cols=C.HIDDEN, max_worker_count=max_worker_count](
         x_input, moe.shared_gate.binding(ctx), shared_gate,
         shared_inter_per_rank, seq_len, pools, prof)
@@ -1127,7 +1097,6 @@ def minimax_m3_kv_mirrors[
     read layout: MinimaxM3Layout[R, FKV, IKV, max_seq_len], degree: Int,
 ) -> List[KVPoolMirror]:
     var mirrors = List[KVPoolMirror]()
-    # FULL_POOL: every layer's main K/V, positions round-robin across ranks.
     mirrors.append(KVPoolMirror(
         page_len=PAGE_LEN,
         pos_shard=degree,
@@ -1139,7 +1108,6 @@ def minimax_m3_kv_mirrors[
             num_pages=batching_seq_len // PAGE_LEN,
             fixed_pages_per_seq=0,
             max_pages_per_seq=max_seq_len // PAGE_LEN)))
-    # INDEX_POOL: sparse layers' lightning index-K cache (k-only).
     mirrors.append(KVPoolMirror(
         page_len=PAGE_LEN,
         pos_shard=degree,
@@ -1260,42 +1228,6 @@ struct MinimaxM3[
                 self.layout.tail.proto.final_norm.at(tail_base), C.HIDDEN)
 
     def quant_model_init(mut self):
-        """Post-load init for a ButterquantRecipes checkpoint. The bf16 path
-        needs none of this (model_init covers RoPE); these are the steps a
-        quantized load must run after weights land in the arena and before the
-        first forward.
-
-        1. Split-gain (butterquant §4.2/§4.4). Each SplitGamma weight pairs an
-           offline weight-side factor sqrt(|gamma|) (baked into W by the
-           quantizer) with an activation-side factor sigma = sign(gamma) *
-           sqrt(|gamma|), epsilon-floored on the activation side only. gamma is
-           the gemma (1 + w) gain, so sigma is formed from (1 + w), NOT the
-           stored w; the offline get_gamma must apply the same (1 + w) or the two
-           halves do not multiply back to gamma. This (1 + w) offset is the one
-           correctness item flagged when wiring the recipes.
-
-           MiniMax cannot reuse gemma's in-place norm bake. Both split norms also
-           feed a non-split consumer: input_layernorm feeds the Passthrough
-           indexer in addition to Qkv, and post_attention_layernorm feeds the
-           gauged router in addition to the experts. Those consumers need the
-           full gain (1 + w) * x / rms, so sigma must be applied at the split
-           weight's activation prep, leaving the shared norm weight at (1 + w)
-           for the full-gain consumers -- it is not folded into the norm weight.
-
-        2. Colsum (butterquant §2.5). PerRowCs / PerBlockCs reserve a colsum
-           member in the arena that the loader never fills. Compute it from the
-           loaded int8 weights here: cs[n] = sum_k W_i8[n, k] (per-row) or
-           cs[n, b] (per-block), per-expert for the grouped MoE / shared weights.
-           NoColsum slots (LmHead) skip this.
-
-        3. Router (butterquant §13.2/§13.4). RouterCenter weights are centered
-           bf16 plus a bf16 gauge plus an f32 bias. The gauge pivot
-           p = sum_k x_k g[k] is per-token (runtime), so init only confirms the
-           gauge and bias sidecars resolved at their slot offsets.
-
-        4. Shared with model_init: RoPE tables (main + index) and the floating
-           point environment priming the quant kernels assume.
-        """
         abort("minimax_m3: quant_model_init not implemented")
 
     def batch_geometry(self) -> BatchGeometry:
@@ -1329,7 +1261,6 @@ struct MinimaxM3[
         var degree = self.degree
         comptime sqrt_n = sqrt[DType.float32, 1](C.HIDDEN)
         comptime n_eps = Float32(C.HIDDEN) * C.RMS_NORM_EPS
-        # MiniMax does not scale token embeddings (unlike Gemma's sqrt(hidden)).
         comptime embed_scale = Float64(1.0)
         var vocab_per_rank = C.VOCAB_SIZE // degree
         var shard_rows = MinimaxM3TailShapes.Embed.data_n(degree)
@@ -1466,8 +1397,6 @@ struct MinimaxM3[
                 num_emit, self.pools, self.profiler)
 
             var out_ptr = outcome[0]
-            # MiniMax has no logit softcap (cap=0 disables it) and untied
-            # embeddings, so sampling reads lm_head, not embed.
             dispatch_flash_sample[
                 cols=C.HIDDEN, cap=Float64(0.0),
                 n_max=MAXIMUM_SAMPLING_LOGITS,

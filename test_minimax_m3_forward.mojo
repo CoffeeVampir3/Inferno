@@ -39,8 +39,6 @@ def load_and_run[
         MinimaxM3[profile=True, Pool=P].POSITIONS_PER_PAGE,
     ](model.batch_geometry(), STEP_BUDGET, Int32(-1))
 
-    # Raw token ids (no tokenizer dependency) -- this is a structural smoke
-    # test of the forward, not a quality check.
     var prompt = List[Int32]()
     for t in range(16):
         prompt.append(Int32(100 + t))

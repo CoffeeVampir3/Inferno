@@ -28,7 +28,7 @@ comptime TOP_K = 4
 
 comptime ALIGNMENT = 64
 comptime WARMUP = 10
-comptime SAMPLES = DEFAULT_SAMPLES
+comptime SAMPLES = 200
 comptime NUM_SEQ_SIZES = 5
 comptime MAX_SEQ = 1024
 comptime SCRATCH_PER_WORKER = 4 * 2 * 64
@@ -305,12 +305,12 @@ def run_all[P: BurstThreadPool, //](
         var f2 = time_fused[NR=2](
             pools, samples, seq, x, ofs, routes, gate_up, down,
             scratch, bucket, accum, out2, epr)
-        var f4 = time_fused[NR=4](
+        var f3 = time_fused[NR=3](
             pools, samples, seq, x, ofs, routes, gate_up, down,
             scratch, bucket, accum, out2, epr)
         report_speedup("fusedNR1", b, f1)
         report_speedup("fusedNR2", b, f2)
-        report_speedup("fusedNR4", b, f4)
+        report_speedup("fusedNR3", b, f3)
 
 
 def arena_bytes_for(tp: Int) -> Int:

@@ -6,7 +6,6 @@ from kernels.helpers import (
     BF16Ptr, F32Ptr, I32Ptr, W, BW,
     fanout_dispatch, saturate_workers,
 )
-from kernels.dot_products import bf16_pair_dot
 from kernels.moe_router import SparseRoute, SparseRoutePtr
 from kernels.moe_experts import dispatch_phase2_down
 from kernels.profiling import Profiler
@@ -14,6 +13,7 @@ from kernels.profiling import Profiler
 from prototypes.swiglu_oai import (
     swiglu_oai_activate, M3_SWIGLU_ALPHA, M3_SWIGLU_LIMIT,
 )
+from prototypes.panel_bf16 import bf16_microtile
 
 
 @always_inline
@@ -33,29 +33,17 @@ def emit_gate_up_microtile[
     stream is amortized across both projections and across ncol outputs. The
     panel*ncol*2 independent accumulators supply the instruction-level
     parallelism that port_unroll used to provide in the MR x 1 kernel."""
-    var gacc = InlineArray[InlineArray[SIMD[DType.float32, W], ncol], panel](
-        fill=InlineArray[SIMD[DType.float32, W], ncol](
-            fill=SIMD[DType.float32, W](0)))
-    var uacc = InlineArray[InlineArray[SIMD[DType.float32, W], ncol], panel](
-        fill=InlineArray[SIMD[DType.float32, W], ncol](
-            fill=SIMD[DType.float32, W](0)))
-
-    for i in range(hidden // BW):
-        var off = i * BW
-        var xv = InlineArray[SIMD[DType.bfloat16, BW], panel](uninitialized=True)
-        comptime for r in range(panel):
-            xv[r] = (x_rows[r] + off).load[width=BW]()
-        comptime for c in range(ncol):
-            var gw = (gate_col0 + c * hidden + off).load[width=BW]()
-            var uw = (up_col0 + c * hidden + off).load[width=BW]()
-            comptime for r in range(panel):
-                gacc[r][c] = bf16_pair_dot(gacc[r][c], xv[r], gw)
-                uacc[r][c] = bf16_pair_dot(uacc[r][c], xv[r], uw)
+    var gb = InlineArray[BF16Ptr, 2](uninitialized=True)
+    gb[0] = gate_col0
+    gb[1] = up_col0
+    var vals = bf16_microtile[
+        panel, ncol, GROUPS=2, contraction=hidden,
+    ](x_rows, gb)
 
     comptime for r in range(panel):
         comptime for c in range(ncol):
-            gate_part[r * tile_j + jc + c] = gacc[r][c].reduce_add()
-            up_part[r * tile_j + jc + c] = uacc[r][c].reduce_add()
+            gate_part[r * tile_j + jc + c] = vals[c * panel + r]
+            up_part[r * tile_j + jc + c] = vals[(ncol + c) * panel + r]
 
 
 @always_inline

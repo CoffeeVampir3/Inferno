@@ -6,9 +6,9 @@ from kernels.helpers import (
     BF16Ptr, F32Ptr, I32Ptr, W, BW,
     fanout_dispatch, saturate_workers,
 )
-from kernels.dot_products import bf16_panel_dot_to_scalars
 from kernels.moe_router import SparseRoute, SparseRoutePtr
 from kernels.moe_experts import dispatch_phase2_down
+from kernels.panel import bf16_microtile, pick_nc
 from kernels.profiling import Profiler
 
 from prototypes.swiglu_oai import (
@@ -18,7 +18,7 @@ from prototypes.swiglu_oai import (
 
 @always_inline
 def emit_gate_up_panel_oai[
-    panel: Int, hidden: Int, intermediate: Int, tile_j: Int, port_unroll: Int,
+    panel: Int, NR: Int, hidden: Int, intermediate: Int, tile_j: Int,
     alpha: Float32, limit: Float32,
 ](
     routes: SparseRoutePtr,
@@ -35,18 +35,31 @@ def emit_gate_up_panel_oai[
     comptime for r in range(panel):
         x_rows[r] = x_normed + Int(routes[rec_start + r].token) * hidden
 
-    for j_off in range(n_cols):
-        var w_row_g = gate_w_base + j_off * hidden
-        var w_row_u = up_w_base + j_off * hidden
-        var g_vals = bf16_panel_dot_to_scalars[
-            cols=hidden, port_unroll=port_unroll,
-        ](w_row_g, x_rows)
-        var u_vals = bf16_panel_dot_to_scalars[
-            cols=hidden, port_unroll=port_unroll,
-        ](w_row_u, x_rows)
+    var jc = 0
+    while jc + NR <= n_cols:
+        var gb = InlineArray[BF16Ptr, 2](uninitialized=True)
+        gb[0] = gate_w_base + jc * hidden
+        gb[1] = up_w_base + jc * hidden
+        var vals = bf16_microtile[
+            panel, NR, GROUPS=2, contraction=hidden,
+        ](x_rows, gb)
         comptime for r in range(panel):
-            gate_part[r * tile_j + j_off] = g_vals[r]
-            up_part[r * tile_j + j_off] = u_vals[r]
+            comptime for c in range(NR):
+                gate_part[r * tile_j + jc + c] = vals[c * panel + r]
+                up_part[r * tile_j + jc + c] = vals[(NR + c) * panel + r]
+        jc += NR
+
+    while jc < n_cols:
+        var gb = InlineArray[BF16Ptr, 2](uninitialized=True)
+        gb[0] = gate_w_base + jc * hidden
+        gb[1] = up_w_base + jc * hidden
+        var vals = bf16_microtile[
+            panel, 1, GROUPS=2, contraction=hidden,
+        ](x_rows, gb)
+        comptime for r in range(panel):
+            gate_part[r * tile_j + jc] = vals[r]
+            up_part[r * tile_j + jc] = vals[panel + r]
+        jc += 1
 
     comptime for r in range(panel):
         var bucket_row = bucket_base + r * intermediate
@@ -63,10 +76,8 @@ def emit_gate_up_panel_oai[
 struct M3Phase1GateUpKernel[
     hidden: Int, gate_up_fused: Int, intermediate: Int,
     alpha: Float32, limit: Float32,
-    tile_j: Int = 64, MR: Int = 4,
+    tile_j: Int = 64, MR: Int = 4, NR: Int = 3,
 ](WorkerRangePartitionedKernel):
-    comptime PU_GU = 4
-
     var x_normed: BF16Ptr
     var expert_offset: I32Ptr
     var routes: SparseRoutePtr
@@ -79,18 +90,16 @@ struct M3Phase1GateUpKernel[
     var col_end: Int
 
     def execute(mut self):
-        comptime PU_GU = Self.PU_GU
-        comptime STRIDE_GU = PU_GU * BW
-
         comptime assert Self.intermediate % W == 0, (
             "Phase1: intermediate must be a multiple of f32 SIMD width")
         comptime assert Self.tile_j % W == 0, (
             "Phase1: tile_j must be a multiple of f32 SIMD width")
-        comptime assert Self.hidden % STRIDE_GU == 0, (
-            "Phase1: hidden must be divisible by STRIDE_GU")
+        comptime assert Self.hidden % BW == 0, (
+            "Phase1: hidden must be a multiple of the bf16 SIMD width")
         comptime assert Self.gate_up_fused == 2 * Self.intermediate, (
             "Phase1: gate_up_fused must be 2 * intermediate")
         comptime worker_part = Self.MR * 2 * Self.tile_j
+        comptime ENR = pick_nc[Self.MR, 2, Self.NR]()
 
         debug_assert(
             self.col_start >= 0 and self.col_start <= self.col_end
@@ -124,9 +133,9 @@ struct M3Phase1GateUpKernel[
                         + (rec_lo + rec_block) * Self.intermediate
                         + j)
                     emit_gate_up_panel_oai[
-                        panel=Self.MR, hidden=Self.hidden,
+                        panel=Self.MR, NR=ENR, hidden=Self.hidden,
                         intermediate=Self.intermediate, tile_j=Self.tile_j,
-                        port_unroll=PU_GU, alpha=Self.alpha, limit=Self.limit,
+                        alpha=Self.alpha, limit=Self.limit,
                     ](
                         self.routes, self.x_normed, rec_lo + rec_block,
                         gate_w_base, up_w_base,
@@ -140,9 +149,9 @@ struct M3Phase1GateUpKernel[
                         + (rec_lo + rec_block) * Self.intermediate
                         + j)
                     emit_gate_up_panel_oai[
-                        panel=1, hidden=Self.hidden,
+                        panel=1, NR=ENR, hidden=Self.hidden,
                         intermediate=Self.intermediate, tile_j=Self.tile_j,
-                        port_unroll=PU_GU, alpha=Self.alpha, limit=Self.limit,
+                        alpha=Self.alpha, limit=Self.limit,
                     ](
                         self.routes, self.x_normed, rec_lo + rec_block,
                         gate_w_base, up_w_base,
@@ -165,7 +174,7 @@ def dispatch_m3_phase1_gate_up[
     P: BurstThreadPool, Profile: Bool, N: Int, o: ImmutOrigin, //,
     hidden: Int, gate_up_fused: Int, intermediate: Int,
     alpha: Float32, limit: Float32,
-    tile_j: Int = 64, MR: Int = 4, max_worker_count: Int = 128,
+    tile_j: Int = 64, MR: Int = 4, NR: Int = 3, max_worker_count: Int = 128,
 ](
     x_normed: Binding[BFloat16, o],
     expert_offset: Binding[Int32, o],
@@ -178,7 +187,7 @@ def dispatch_m3_phase1_gate_up[
     mut prof: Profiler[Profile, N],
 ):
     comptime K = M3Phase1GateUpKernel[
-        hidden, gate_up_fused, intermediate, alpha, limit, tile_j, MR,
+        hidden, gate_up_fused, intermediate, alpha, limit, tile_j, MR, NR,
     ]
     comptime n_strides = intermediate // W
     var epr = experts_per_rank
@@ -206,7 +215,7 @@ comptime M3_DENSE_GATE_UP_FUSED = 2 * M3_DENSE_INTERMEDIATE
 
 def dispatch_minimax_m3_moe_experts[
     P: BurstThreadPool, Profile: Bool, N: Int, o: ImmutOrigin, //,
-    hidden: Int, intermediate: Int, max_worker_count: Int = 128,
+    hidden: Int, intermediate: Int, NR: Int = 3, max_worker_count: Int = 128,
 ](
     x_normed: Binding[BFloat16, o],
     expert_offset: Binding[Int32, o],
@@ -224,7 +233,7 @@ def dispatch_minimax_m3_moe_experts[
 ):
     dispatch_m3_phase1_gate_up[
         hidden=hidden, gate_up_fused=2 * intermediate, intermediate=intermediate,
-        alpha=M3_SWIGLU_ALPHA, limit=M3_SWIGLU_LIMIT,
+        alpha=M3_SWIGLU_ALPHA, limit=M3_SWIGLU_LIMIT, NR=NR,
         max_worker_count=max_worker_count,
     ](x_normed, expert_offset, routes, experts_gate_up,
       gate_scratch, hidden_bucket, experts_per_rank, pools, prof)

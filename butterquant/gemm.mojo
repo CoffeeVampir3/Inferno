@@ -95,20 +95,74 @@ def accumulate_n_step[width: Int, PR: Int](
 
 
 @always_inline
-def accumulate_n_step_gathered[width: Int, PR: Int](
-    rows: InlineArray[I8Ptr, PR],
+def vnni_grouped_fits[PR: Int, GROUPS: Int, per_block: Bool]() -> Bool:
+    """Register budget for the grouped VNNI panel: GROUPS weight regions sharing
+    one activation broadcast per row. acc_count i32 accumulators per row per
+    group (+ same count of f32 if per_block), plus one shared broadcast per row.
+    Mirrors reg_capped_panel, generalized over GROUPS."""
+    comptime width = simd_width_of[DType.int32]()
+    comptime acc_count = VNNI_N_STEP // width
+    comptime regs = 2 * width
+    comptime per_pr = GROUPS * (2 * acc_count if per_block else acc_count) + 1
+    comptime reserve = VNNI_TILE_N // width + 1
+    return PR * per_pr + reserve <= regs
+
+
+@always_inline
+def accumulate_tiles_grouped[
+    width: Int, PR: Int, GROUPS: Int, row_ptr: def(Int) capturing [_] -> I8Ptr,
+](
     wpacked: I8Ptr,
-    packed_base: Int,
+    read packed_base: InlineArray[Int, GROUPS],
     k_base: Int,
     k_len: Int,
-    mut acc: InlineArray[SIMD[DType.int32, width], PR * (VNNI_N_STEP // width)],
+    mut acc: InlineArray[
+        SIMD[DType.int32, width], GROUPS * PR * (VNNI_N_STEP // width),
+    ],
 ):
-    @parameter
-    def row_ptr(r: Int) -> I8Ptr:
-        return rows[r]
+    """One VNNI K-walk feeding GROUPS weight regions from a single activation
+    broadcast. For each (ks, dc) chunk the activation bytes are loaded and
+    bias-folded once into `ab[r]`, then vpdpbusd'd against every group's tile,
+    so the activation stream is shared instead of re-walked per region. This is
+    the int8 analog of loading each x chunk once and feeding both projections.
+    Per-group accumulators are contiguous (group g at offset g*PR*acc_count), so
+    each group finalizes exactly like the single-group accumulate_tiles."""
+    comptime passes = VNNI_TILE_N // width
+    comptime bytes_per_pass = width * VNNI_BLK
+    comptime acc_count = VNNI_N_STEP // width
+    comptime dc_count = VNNI_K_STEP // VNNI_BLK
+    comptime tile_dc_bytes = VNNI_TILE_N * VNNI_BLK
+    comptime tile_ks_bytes = dc_count * tile_dc_bytes
+    comptime group_stride = PR * acc_count
 
-    accumulate_tiles[width, PR, row_ptr](
-        wpacked, packed_base, k_base, k_len, acc)
+    var packed_off = InlineArray[Int, GROUPS](uninitialized=True)
+    comptime for g in range(GROUPS):
+        packed_off[g] = packed_base[g]
+
+    for ks in range(0, k_len, VNNI_K_STEP):
+        for dc in range(dc_count):
+            var k_pos = k_base + ks + dc * VNNI_BLK
+            var ab = InlineArray[SIMD[DType.uint8, width * 4], PR](
+                uninitialized=True)
+            comptime for r in range(PR):
+                ab[r] = act_broadcast_vnni[width](row_ptr(r), k_pos)
+            comptime for g in range(GROUPS):
+                var t0 = packed_off[g] + dc * tile_dc_bytes
+                var t1 = t0 + tile_ks_bytes
+                comptime for p in range(passes):
+                    var w0 = (wpacked + t0 + p * bytes_per_pass).load[
+                        width = width * 4, non_temporal=True]()
+                    comptime for r in range(PR):
+                        var k = g * group_stride + r * acc_count + p
+                        acc[k] = dot_loaded[width](acc[k], ab[r], w0)
+                comptime for p in range(passes):
+                    var w1 = (wpacked + t1 + p * bytes_per_pass).load[
+                        width = width * 4, non_temporal=True]()
+                    comptime for r in range(PR):
+                        var k = g * group_stride + r * acc_count + passes + p
+                        acc[k] = dot_loaded[width](acc[k], ab[r], w1)
+        comptime for g in range(GROUPS):
+            packed_off[g] += 2 * tile_ks_bytes
 
 
 @always_inline

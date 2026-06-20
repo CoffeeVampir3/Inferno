@@ -11,7 +11,9 @@ from kernels.moe_router import SparseRoute, SparseRoutePtr
 from kernels.profiling import Profiler
 
 from butterquant.convert import store_bf16
-from butterquant.gemm import accumulate_n_step, accumulate_n_step_gathered
+from butterquant.gemm import (
+    accumulate_n_step, accumulate_tiles_grouped, vnni_grouped_fits,
+)
 from butterquant.dot_products import vnni_colsum_correct
 from butterquant.vnni import VNNI_N_STEP
 from butterquant.types import F32Ptr, I8Ptr
@@ -36,8 +38,11 @@ def emit_bq_gate_up_panel[
     cs: F32Ptr,
     bucket: BF16Ptr,
 ):
+    comptime assert vnni_grouped_fits[PR, 2, False](), (
+        "bq gate/up fused panel exceeds the i32 register budget; lower MR")
     comptime width = simd_width_of[DType.int32]()
     comptime acc_count = VNNI_N_STEP // width
+    comptime group_stride = PR * acc_count
     comptime inv127 = Float32(1.0) / Float32(127.0)
     var gate_tile = it
     var up_tile = n_inter_tiles + it
@@ -49,14 +54,17 @@ def emit_bq_gate_up_panel[
         rows[r] = x_i8 + tok * hidden
         scales[r] = x_sa[tok]
 
-    var gacc = InlineArray[SIMD[DType.int32, width], PR * acc_count](
+    @parameter
+    def row_ptr(r: Int) -> I8Ptr:
+        return rows[r]
+
+    var pbase = InlineArray[Int, 2](uninitialized=True)
+    pbase[0] = gate_tile * VNNI_N_STEP * hidden
+    pbase[1] = up_tile * VNNI_N_STEP * hidden
+
+    var acc = InlineArray[SIMD[DType.int32, width], 2 * PR * acc_count](
         fill=SIMD[DType.int32, width](0))
-    var uacc = InlineArray[SIMD[DType.int32, width], PR * acc_count](
-        fill=SIMD[DType.int32, width](0))
-    accumulate_n_step_gathered[width, PR](
-        rows, w, gate_tile * VNNI_N_STEP * hidden, 0, hidden, gacc)
-    accumulate_n_step_gathered[width, PR](
-        rows, w, up_tile * VNNI_N_STEP * hidden, 0, hidden, uacc)
+    accumulate_tiles_grouped[width, PR, 2, row_ptr](w, pbase, 0, hidden, acc)
 
     comptime for r in range(PR):
         var ad = scales[r] * inv127
@@ -67,9 +75,10 @@ def emit_bq_gate_up_panel[
             var gcs = (cs + ng).load[width=width]()
             var ucs = (cs + nu).load[width=width]()
             var gv = vnni_colsum_correct[width](
-                gacc[r * acc_count + a], gcs) * ad * (wsc + ng).load[width=width]()
+                acc[r * acc_count + a], gcs) * ad * (wsc + ng).load[width=width]()
             var uv = vnni_colsum_correct[width](
-                uacc[r * acc_count + a], ucs) * ad * (wsc + nu).load[width=width]()
+                acc[group_stride + r * acc_count + a], ucs) * ad * (
+                wsc + nu).load[width=width]()
             var res = gelu_tanh_f32[width](gv) * uv
             store_bf16[width](res, bucket_row + a * width)
 

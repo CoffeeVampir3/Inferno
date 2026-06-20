@@ -7,14 +7,14 @@ from .helpers import (
     BF16Ptr, F32Ptr, I32Ptr, W, BW,
     fanout_dispatch, saturate_workers,
 )
-from .dot_products import bf16_panel_dot_to_scalars
+from .panel import bf16_microtile, pick_nc
 from .moe_router import SparseRoute, SparseRoutePtr
 from .profiling import Profiler
 
 
 @always_inline
 def emit_gate_up_panel[
-    panel: Int, hidden: Int, intermediate: Int, tile_j: Int, port_unroll: Int,
+    panel: Int, NR: Int, hidden: Int, intermediate: Int, tile_j: Int,
 ](
     routes: SparseRoutePtr,
     x_normed: BF16Ptr,
@@ -30,18 +30,31 @@ def emit_gate_up_panel[
     comptime for r in range(panel):
         x_rows[r] = x_normed + Int(routes[rec_start + r].token) * hidden
 
-    for j_off in range(n_cols):
-        var w_row_g = gate_w_base + j_off * hidden
-        var w_row_u = up_w_base + j_off * hidden
-        var g_vals = bf16_panel_dot_to_scalars[
-            cols=hidden, port_unroll=port_unroll,
-        ](w_row_g, x_rows)
-        var u_vals = bf16_panel_dot_to_scalars[
-            cols=hidden, port_unroll=port_unroll,
-        ](w_row_u, x_rows)
+    var jc = 0
+    while jc + NR <= n_cols:
+        var gb = InlineArray[BF16Ptr, 2](uninitialized=True)
+        gb[0] = gate_w_base + jc * hidden
+        gb[1] = up_w_base + jc * hidden
+        var vals = bf16_microtile[
+            panel, NR, GROUPS=2, contraction=hidden,
+        ](x_rows, gb)
         comptime for r in range(panel):
-            gate_part[r * tile_j + j_off] = g_vals[r]
-            up_part[r * tile_j + j_off] = u_vals[r]
+            comptime for c in range(NR):
+                gate_part[r * tile_j + jc + c] = vals[c * panel + r]
+                up_part[r * tile_j + jc + c] = vals[(NR + c) * panel + r]
+        jc += NR
+
+    while jc < n_cols:
+        var gb = InlineArray[BF16Ptr, 2](uninitialized=True)
+        gb[0] = gate_w_base + jc * hidden
+        gb[1] = up_w_base + jc * hidden
+        var vals = bf16_microtile[
+            panel, 1, GROUPS=2, contraction=hidden,
+        ](x_rows, gb)
+        comptime for r in range(panel):
+            gate_part[r * tile_j + jc] = vals[r]
+            up_part[r * tile_j + jc] = vals[panel + r]
+        jc += 1
 
     comptime for r in range(panel):
         var bucket_row = bucket_base + r * intermediate
@@ -57,17 +70,12 @@ def emit_gate_up_panel[
 @fieldwise_init
 struct Phase1GateUpKernel[
     hidden: Int, gate_up_fused: Int, intermediate: Int,
-    tile_j: Int = 64, MR: Int = 4,
+    tile_j: Int = 64, MR: Int = 4, NR: Int = 3,
 ](WorkerRangePartitionedKernel):
     """Column-partitioned gate/up projection. Each worker owns an
-    intermediate-column slice [col_start, col_end) and streams that slice
-    of every routed expert's gate_up weight. In decode a token routes to
-    only top_k experts, so partitioning over experts would leave each
-    expert's weight to a single worker; partitioning over columns spreads
-    every expert's weight stream across all workers. Bucket writes are
-    disjoint across workers by column."""
-    comptime PU_GU = 4
-
+    intermediate-column slice [col_start, col_end) and streams that slice of
+    every routed expert's gate_up weight. GROUPS=2 instance of the unified bf16
+    panel: each x-chunk feeds both the gate and up columns once."""
     var x_normed: BF16Ptr
     var expert_offset: I32Ptr
     var routes: SparseRoutePtr
@@ -80,18 +88,16 @@ struct Phase1GateUpKernel[
     var col_end: Int
 
     def execute(mut self):
-        comptime PU_GU = Self.PU_GU
-        comptime STRIDE_GU = PU_GU * BW
-
         comptime assert Self.intermediate % W == 0, (
             "Phase1: intermediate must be a multiple of f32 SIMD width")
         comptime assert Self.tile_j % W == 0, (
             "Phase1: tile_j must be a multiple of f32 SIMD width")
-        comptime assert Self.hidden % STRIDE_GU == 0, (
-            "Phase1: hidden must be divisible by STRIDE_GU")
+        comptime assert Self.hidden % BW == 0, (
+            "Phase1: hidden must be a multiple of the bf16 SIMD width")
         comptime assert Self.gate_up_fused == 2 * Self.intermediate, (
             "Phase1: gate_up_fused must be 2 * intermediate")
         comptime worker_part = Self.MR * 2 * Self.tile_j
+        comptime ENR = pick_nc[Self.MR, 2, Self.NR]()
 
         debug_assert(
             self.col_start >= 0 and self.col_start <= self.col_end
@@ -125,9 +131,8 @@ struct Phase1GateUpKernel[
                         + (rec_lo + rec_block) * Self.intermediate
                         + j)
                     emit_gate_up_panel[
-                        panel=Self.MR, hidden=Self.hidden,
+                        panel=Self.MR, NR=ENR, hidden=Self.hidden,
                         intermediate=Self.intermediate, tile_j=Self.tile_j,
-                        port_unroll=PU_GU,
                     ](
                         self.routes, self.x_normed, rec_lo + rec_block,
                         gate_w_base, up_w_base,
@@ -141,9 +146,8 @@ struct Phase1GateUpKernel[
                         + (rec_lo + rec_block) * Self.intermediate
                         + j)
                     emit_gate_up_panel[
-                        panel=1, hidden=Self.hidden,
+                        panel=1, NR=ENR, hidden=Self.hidden,
                         intermediate=Self.intermediate, tile_j=Self.tile_j,
-                        port_unroll=PU_GU,
                     ](
                         self.routes, self.x_normed, rec_lo + rec_block,
                         gate_w_base, up_w_base,
@@ -165,7 +169,7 @@ struct Phase1GateUpKernel[
 def dispatch_phase1_gate_up[
     P: BurstThreadPool, Profile: Bool, N: Int, o: ImmutOrigin, //,
     hidden: Int, gate_up_fused: Int, intermediate: Int,
-    tile_j: Int = 64, MR: Int = 4, max_worker_count: Int = 128,
+    tile_j: Int = 64, MR: Int = 4, NR: Int = 3, max_worker_count: Int = 128,
 ](
     x_normed: Binding[BFloat16, o],
     expert_offset: Binding[Int32, o],
@@ -178,7 +182,7 @@ def dispatch_phase1_gate_up[
     mut prof: Profiler[Profile, N],
 ):
     comptime K = Phase1GateUpKernel[
-        hidden, gate_up_fused, intermediate, tile_j, MR,
+        hidden, gate_up_fused, intermediate, tile_j, MR, NR,
     ]
     comptime n_strides = intermediate // W
     var epr = experts_per_rank
@@ -199,7 +203,7 @@ def dispatch_phase1_gate_up[
 
 @always_inline
 def emit_down_panel[
-    panel: Int, hidden: Int, intermediate: Int, port_unroll: Int,
+    panel: Int, NC: Int, hidden: Int, intermediate: Int,
 ](
     routes: SparseRoutePtr,
     moe_accum: F32Ptr,
@@ -217,13 +221,28 @@ def emit_down_panel[
         dst_rows[r] = moe_accum + Int(rec.token) * hidden
         weights[r] = rec.weight
 
-    for m in range(start, end):
-        var w_row = down_w + m * intermediate
-        var vals = bf16_panel_dot_to_scalars[
-            cols=intermediate, port_unroll=port_unroll,
-        ](w_row, hm_rows)
+    var m = start
+    while m + NC <= end:
+        var gb = InlineArray[BF16Ptr, 1](uninitialized=True)
+        gb[0] = down_w + m * intermediate
+        var vals = bf16_microtile[
+            panel, NC, GROUPS=1, contraction=intermediate,
+        ](hm_rows, gb)
+        comptime for c in range(NC):
+            comptime for r in range(panel):
+                (dst_rows[r] + m + c)[] = (
+                    (dst_rows[r] + m + c)[] + vals[c * panel + r] * weights[r])
+        m += NC
+
+    while m < end:
+        var gb = InlineArray[BF16Ptr, 1](uninitialized=True)
+        gb[0] = down_w + m * intermediate
+        var vals = bf16_microtile[
+            panel, 1, GROUPS=1, contraction=intermediate,
+        ](hm_rows, gb)
         comptime for r in range(panel):
             (dst_rows[r] + m)[] = (dst_rows[r] + m)[] + vals[r] * weights[r]
+        m += 1
 
 
 @fieldwise_init
@@ -232,7 +251,7 @@ struct Phase2DownKernel[
 ](RangePartitionedKernel):
     comptime TOK_TILE = 64
     comptime MR = 4
-    comptime PU_DN = 2
+    comptime NC = 4
 
     var expert_offset: I32Ptr
     var routes: SparseRoutePtr
@@ -246,11 +265,10 @@ struct Phase2DownKernel[
     var col_end: Int
 
     def execute(mut self):
-        comptime PU_DN = Self.PU_DN
-        comptime STRIDE_DN = PU_DN * BW
         comptime MR = Self.MR
-        comptime assert Self.intermediate % STRIDE_DN == 0, (
-            "Phase2: intermediate must divide STRIDE_DN")
+        comptime ENC = pick_nc[MR, 1, Self.NC]()
+        comptime assert Self.intermediate % BW == 0, (
+            "Phase2: intermediate must be a multiple of the bf16 SIMD width")
 
         for tok in range(self.seq_len):
             var acc_row = self.moe_accum + tok * Self.hidden
@@ -279,8 +297,8 @@ struct Phase2DownKernel[
                     var rec_start = rec_lo + tok_base + rec_block
                     var hm_base = self.hidden_bucket + rec_start * Self.intermediate
                     emit_down_panel[
-                        panel=MR, hidden=Self.hidden,
-                        intermediate=Self.intermediate, port_unroll=PU_DN,
+                        panel=MR, NC=ENC, hidden=Self.hidden,
+                        intermediate=Self.intermediate,
                     ](
                         self.routes, self.moe_accum, rec_start,
                         hm_base, down_w, self.col_start, self.col_end,
@@ -291,8 +309,8 @@ struct Phase2DownKernel[
                     var rec_start = rec_lo + tok_base + rec_block
                     var hm_base = self.hidden_bucket + rec_start * Self.intermediate
                     emit_down_panel[
-                        panel=1, hidden=Self.hidden,
-                        intermediate=Self.intermediate, port_unroll=PU_DN,
+                        panel=1, NC=ENC, hidden=Self.hidden,
+                        intermediate=Self.intermediate,
                     ](
                         self.routes, self.moe_accum, rec_start,
                         hm_base, down_w, self.col_start, self.col_end,

@@ -18,10 +18,6 @@ from kernels.profiling import Profiler, DispatchSpan
 
 
 def bank_cap(topk: Int, width: Int) -> Int:
-    """Candidate-bank size for the streaming top-k: the smallest power of two
-    that is `>= 2 * topk` (so a compaction always leaves room for another full
-    group of `topk` fresh blocks) and `>= width` (so it tiles cleanly into
-    `width`-lane SIMD registers)."""
     var cap = 1
     while cap < 2 * topk:
         cap <<= 1
@@ -41,12 +37,6 @@ def bank_reduce[
     mut keep_b: InlineArray[Int32, topk],
     mut keep_v: InlineArray[Float32, topk],
 ):
-    """Top-k of the candidate bank via `simd_math.reduce_top_k`, descending.
-
-    `tags` are the canonical lane positions (`iota`), which `reduce_top_k`
-    requires to address the winner lane for masking; the returned positions map
-    back to block ids through the parallel `bank_b`. Exhausted (sentinel) picks
-    re-emit lane 0, so callers gate validity on `keep_v[s] > sentinel`."""
     var lanes = InlineArray[Int, topk](fill=0)
     reduce_top_k[DType.float32, width, regs, topk](
         bank_v, tags, sentinel, lanes, keep_v)
@@ -62,13 +52,6 @@ def stream_select_blocks[
     num_blocks: Int,
     out_row: I32Ptr,
 ):
-    """Stream per-block scores into a `reduce_top_k`-compacted bank and write the
-    `topk_blocks` selected block ids (ascending, left-packed, `-1` padded).
-
-    The `local_blocks` most recent and first `init_blocks` blocks are forced in
-    at `+inf`; every other block's score comes from `score_at(b)`. State stays
-    bounded at O(bank) regardless of `num_blocks`, the same partial-then-merge
-    shape the reference `index_topk` kernel uses for long context."""
     comptime NEG = Float32(-1.0e30)
     comptime FORCE = Float32(1.0e30)
     comptime CAP = bank_cap(topk_blocks, W)
@@ -142,12 +125,6 @@ def stream_select_blocks[
         out_row[k] = ids[k]
 
 
-# ---------------------------------------------------------------------------
-# Phase A — per-rank local block scoring (NUMA-local reads).
-# Mirrors FlashPrefillFullKernel: queries replicated, index-K context round-
-# robin sharded. Each rank scans only the key positions it owns and scatters a
-# per-block partial max into its own partial-score arena.
-# ---------------------------------------------------------------------------
 @fieldwise_init
 struct IndexBlockScoreKernel[
     index_head_dim: Int, num_index_heads: Int, block_size: Int,
@@ -178,6 +155,8 @@ struct IndexBlockScoreKernel[
             self.runs[].row_ptr(0), self.page_shift, self.row_mask, -1)
         var run_start = Int(run_list[0].buf_start)
         var run_pos = Int(run_list[0].base_pos)
+        var bstride = self.block_stride
+        var tstride = Self.num_index_heads * bstride
 
         for t in range(self.start, self.end):
             while ri + 1 < num_runs and t >= Int(run_list[ri + 1].buf_start):
@@ -192,14 +171,16 @@ struct IndexBlockScoreKernel[
             var num_blocks = abs_pos // Self.block_size + 1
             var local_kv = full_local_kv_count(self.rank, abs_pos, self.degree)
 
-            var prow = self.partial + t * self.block_stride
-            var bz = 0
-            while bz + W <= num_blocks:
-                (prow + bz).store(SIMD[DType.float32, W](NEG))
-                bz += W
-            while bz < num_blocks:
-                prow[bz] = NEG
-                bz += 1
+            var tok_base = self.partial + t * tstride
+            comptime for h in range(Self.num_index_heads):
+                var prow = tok_base + h * bstride
+                var bz = 0
+                while bz + W <= num_blocks:
+                    (prow + bz).store(SIMD[DType.float32, W](NEG))
+                    bz += W
+                while bz < num_blocks:
+                    prow[bz] = NEG
+                    bz += 1
 
             var q_heads = InlineArray[BF16Ptr, Self.num_index_heads](
                 uninitialized=True)
@@ -213,15 +194,13 @@ struct IndexBlockScoreKernel[
                 var dots = bf16_panel_dot_to_scalars[
                     cols = Self.index_head_dim, port_unroll=PU,
                 ](k_ptr, q_heads)
-                var s = dots[0]
-                comptime for h in range(1, Self.num_index_heads):
-                    if dots[h] > s:
-                        s = dots[h]
-                s *= self.scale
                 var g = pos * self.degree + self.rank
                 var b = g // Self.block_size
-                if s > prow[b]:
-                    prow[b] = s
+                comptime for h in range(Self.num_index_heads):
+                    var sh = dots[h] * self.scale
+                    var cell = tok_base + h * bstride + b
+                    if sh > cell[]:
+                        cell[] = sh
 
     @always_inline
     def install_range(mut self, start: Int, end: Int):
@@ -270,16 +249,10 @@ def dispatch_index_block_scores[
     ](pools, prof, seq_len, data_bytes)
 
 
-# ---------------------------------------------------------------------------
-# Phase B — cross-rank merge + top-k (sharded over query tokens).
-# Mirrors dispatch_merge_router_candidates: each rank owns a token slice, reads
-# every rank's partial block scores (remote reads), max-reduces per block to the
-# global score, then runs the streaming top-k. Writes selections for its own
-# token slice into its local block_idx arena.
-# ---------------------------------------------------------------------------
 @fieldwise_init
 struct IndexTopkMergeKernel[
-    block_size: Int, topk_blocks: Int, local_blocks: Int, init_blocks: Int,
+    block_size: Int, num_index_heads: Int, topk_blocks: Int,
+    local_blocks: Int, init_blocks: Int,
     o: ImmutOrigin,
 ](RangePartitionedKernel):
     var partials: Binding[Float32, Self.o]
@@ -295,6 +268,8 @@ struct IndexTopkMergeKernel[
         var out = self.block_idx[self.out_rank]
         var tp = self.degree
         var bstride = self.block_stride
+        var tstride = Self.num_index_heads * bstride
+        comptime bi_tstride = Self.num_index_heads * Self.topk_blocks
         var bases = InlineArray[F32Ptr, 64](uninitialized=True)
         for r in range(tp):
             bases[r] = self.partials[r]
@@ -304,21 +279,23 @@ struct IndexTopkMergeKernel[
             if abs_pos < 0:
                 continue
             var num_blocks = abs_pos // Self.block_size + 1
-            var row_base = t * bstride
 
-            @parameter
-            def merged(b: Int) -> Float32:
-                var best = Float32(-1.0e30)
-                for r in range(tp):
-                    var v = (bases[r] + row_base + b)[]
-                    if v > best:
-                        best = v
-                return best
+            for h in range(Self.num_index_heads):
+                var row_base = t * tstride + h * bstride
 
-            stream_select_blocks[
-                Self.block_size, Self.topk_blocks,
-                Self.local_blocks, Self.init_blocks, merged,
-            ](num_blocks, out + t * Self.topk_blocks)
+                @parameter
+                def merged(b: Int) -> Float32:
+                    var best = Float32(-1.0e30)
+                    for r in range(tp):
+                        var v = (bases[r] + row_base + b)[]
+                        if v > best:
+                            best = v
+                    return best
+
+                stream_select_blocks[
+                    Self.block_size, Self.topk_blocks,
+                    Self.local_blocks, Self.init_blocks, merged,
+                ](num_blocks, out + t * bi_tstride + h * Self.topk_blocks)
 
     @always_inline
     def install_range(mut self, start: Int, end: Int):
@@ -328,7 +305,8 @@ struct IndexTopkMergeKernel[
 
 def dispatch_merge_index_topk[
     P: BurstThreadPool, Profile: Bool, N: Int, o: ImmutOrigin, //,
-    block_size: Int, topk_blocks: Int, local_blocks: Int, init_blocks: Int,
+    block_size: Int, num_index_heads: Int, topk_blocks: Int,
+    local_blocks: Int, init_blocks: Int,
     max_worker_count: Int = 128,
 ](
     partials: Binding[Float32, o],
@@ -344,7 +322,7 @@ def dispatch_merge_index_topk[
     var tp = len(pools)
     var per_node = (seq_len + tp - 1) // tp
     comptime K = IndexTopkMergeKernel[
-        block_size, topk_blocks, local_blocks, init_blocks, o,
+        block_size, num_index_heads, topk_blocks, local_blocks, init_blocks, o,
     ]
     var span = DispatchSpan[Profile]()
     var buf = DispatchBuffer[K, max_worker_count]()
@@ -363,15 +341,10 @@ def dispatch_merge_index_topk[
     span.finish(prof, pools, "lightning_indexer.merge_topk")
 
 
-# ---------------------------------------------------------------------------
-# Phase C — broadcast block_idx so every rank holds the full selection.
-# Mirrors RouteGatherKernel: each rank copies the token slices it does not own
-# from the owning rank's block_idx arena.
-# ---------------------------------------------------------------------------
 @fieldwise_init
-struct BlockIdxBroadcastKernel[topk_blocks: Int, o: ImmutOrigin](
-    RangePartitionedKernel
-):
+struct BlockIdxBroadcastKernel[
+    num_index_heads: Int, topk_blocks: Int, o: ImmutOrigin,
+](RangePartitionedKernel):
     var block_idx: Binding[Int32, Self.o]
     var dest_rank: Int
     var per_node: Int
@@ -380,6 +353,7 @@ struct BlockIdxBroadcastKernel[topk_blocks: Int, o: ImmutOrigin](
     var end: Int
 
     def execute(mut self):
+        comptime stride = Self.num_index_heads * Self.topk_blocks
         var dst = self.block_idx[self.dest_rank]
         for tok in range(self.start, self.end):
             var owner = tok // self.per_node
@@ -388,8 +362,8 @@ struct BlockIdxBroadcastKernel[topk_blocks: Int, o: ImmutOrigin](
             if owner == self.dest_rank:
                 continue
             var src = self.block_idx[owner]
-            var off = tok * Self.topk_blocks
-            for k in range(Self.topk_blocks):
+            var off = tok * stride
+            for k in range(stride):
                 dst[off + k] = src[off + k]
 
     @always_inline
@@ -400,7 +374,7 @@ struct BlockIdxBroadcastKernel[topk_blocks: Int, o: ImmutOrigin](
 
 def dispatch_broadcast_block_idx[
     P: BurstThreadPool, Profile: Bool, N: Int, o: ImmutOrigin, //,
-    topk_blocks: Int, max_worker_count: Int = 128,
+    num_index_heads: Int, topk_blocks: Int, max_worker_count: Int = 128,
 ](
     block_idx: Binding[Int32, o],
     seq_len: Int,
@@ -411,7 +385,7 @@ def dispatch_broadcast_block_idx[
     if tp <= 1 or seq_len <= 0:
         return
     var per_node = (seq_len + tp - 1) // tp
-    comptime K = BlockIdxBroadcastKernel[topk_blocks, o]
+    comptime K = BlockIdxBroadcastKernel[num_index_heads, topk_blocks, o]
     var span = DispatchSpan[Profile]()
     var buf = DispatchBuffer[K, max_worker_count]()
     for r in range(tp):
@@ -440,27 +414,6 @@ def dispatch_lightning_indexer[
     mut pools: List[P],
     mut prof: Profiler[Profile, N],
 ):
-    """Distributed lightning indexer: score (local) -> merge+top-k -> broadcast.
-
-    The index-K context is round-robin sharded across NUMA ranks, so a 128-token
-    block's keys live on every node. The work distributes like full attention:
-
-    1. Score (`dispatch_index_block_scores`): each rank scans only its local key
-       positions and scatters a per-block partial max into its own `partial`
-       arena. The O(queries x local-keys) dot-product cost is split by degree and
-       every read is NUMA-local.
-    2. Merge + top-k (`dispatch_merge_index_topk`): each rank owns a token slice,
-       reads all ranks' partials for those tokens (remote reads, 1/degree of the
-       partials per rank), max-reduces to the global block score, and selects the
-       top-k. Block ids land in that rank's `block_idx`.
-    3. Broadcast (`dispatch_broadcast_block_idx`): block_idx is replicated so the
-       subsequent block-sparse attention on every rank sees the full per-query
-       selection (only at degree > 1).
-
-    `partial` is `[seq_len, block_stride]` scratch per rank with
-    `block_stride >= ceil(max_seq_len / block_size)`. The order respects the NUMA
-    rule: the heavy stage reads local, the merge prefers remote-reads over
-    remote-writes, and only the small selection is broadcast."""
     if seq_len <= 0:
         return
 
@@ -476,13 +429,15 @@ def dispatch_lightning_indexer[
       pools, prof)
 
     dispatch_merge_index_topk[
-        block_size=block_size, topk_blocks=topk_blocks,
+        block_size=block_size, num_index_heads=num_index_heads,
+        topk_blocks=topk_blocks,
         local_blocks=local_blocks, init_blocks=init_blocks,
         max_worker_count=max_worker_count,
     ](partial, block_idx, block_stride, base_pos, seq_len, pools, prof)
 
     dispatch_broadcast_block_idx[
-        topk_blocks=topk_blocks, max_worker_count=max_worker_count,
+        num_index_heads=num_index_heads, topk_blocks=topk_blocks,
+        max_worker_count=max_worker_count,
     ](block_idx, seq_len, pools, prof)
 
 
@@ -509,8 +464,6 @@ def dispatch_minimax_m3_indexer[
     mut pools: List[P],
     mut prof: Profiler[Profile, N],
 ):
-    """MiniMax-M3 instantiation: 4-head index, head dim 128, 128-token blocks,
-    top-16 with the 1 most-recent block always kept, no forced init block."""
     dispatch_lightning_indexer[
         index_head_dim=M3_INDEX_HEAD_DIM,
         num_index_heads=M3_INDEX_NUM_HEADS,

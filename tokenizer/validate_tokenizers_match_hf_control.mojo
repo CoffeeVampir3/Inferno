@@ -480,7 +480,7 @@ def test_gemma4(mut tok: BPETokenizer[...]) -> Tuple[Int, Int]:
     return (p, f)
 
 
-def test_minimax_m27(mut tok: BPETokenizer[...]) -> Tuple[Int, Int]:
+def test_minimax_m3(mut tok: BPETokenizer[...]) -> Tuple[Int, Int]:
     var p = 0
     var f = 0
 
@@ -647,11 +647,15 @@ def test_minimax_m27(mut tok: BPETokenizer[...]) -> Tuple[Int, Int]:
     else: f += 1
 
     # Special tokens
+    if check(tok, "]~b]", [200019]): p += 1
+    else: f += 1
     if check(tok, "]~!b[", [200034]): p += 1
     else: f += 1
     if check(tok, "[e~[", [200020]): p += 1
     else: f += 1
     if check(tok, "]!d~[", [200021]): p += 1
+    else: f += 1
+    if check(tok, "]~b]Hello[e~[", [200019, 19739, 200020]): p += 1
     else: f += 1
     if check(tok, "]~!b[Hello[e~[", [200034, 19739, 200020]): p += 1
     else: f += 1
@@ -661,8 +665,11 @@ def test_minimax_m27(mut tok: BPETokenizer[...]) -> Tuple[Int, Int]:
     if check(tok, "<think>reasoning</think>",
         [200050, 64639, 289, 200051]): p += 1
     else: f += 1
-    if check(tok, "<minimax:tool_call>x</minimax:tool_call>",
+    if check(tok, "<tool_call>x</tool_call>",
         [200052, 120, 200053]): p += 1
+    else: f += 1
+    if check(tok, "<mm:think>r</mm:think>",
+        [200059, 114, 200060]): p += 1
     else: f += 1
 
     return (p, f)
@@ -736,17 +743,17 @@ def run_tokenizer_validation() -> Tuple[Int, Int]:
 
     print()
 
-    print("=== MiniMax-M2.7 ===")
-    var mm_opt = load_tokenizer(Path("checkpoints/Minimax-M2.7/tokenizer.json"))
+    print("=== MiniMax-M3 ===")
+    var mm_opt = load_tokenizer(Path("checkpoints/Minimax-M3/tokenizer.json"))
     if not mm_opt:
-        print("FAILED to load MiniMax-M2.7 tokenizer")
+        print("FAILED to load MiniMax-M3 tokenizer")
     else:
         var mm = mm_opt.take()
         var v = mm.vocab_size()
         var m = mm.num_merges()
         print(t"Vocab: {v} Merges: {m}")
-        var result = test_minimax_m27(mm)
-        print(t"MiniMax-M2.7: {result[0]} passed, {result[1]} failed")
+        var result = test_minimax_m3(mm)
+        print(t"MiniMax-M3: {result[0]} passed, {result[1]} failed")
         total_pass += result[0]
         total_fail += result[1]
 

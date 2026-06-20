@@ -67,14 +67,10 @@ def run_indexer[P: BurstThreadPool, //](
     var index_k_ptr = arena_alloc_all[BFloat16](
         arenas, NUM_KEY_ROWS * M3_INDEX_HEAD_DIM)
     var block_idx_ptr = arena_alloc_all[Int32](
-        arenas, SEQ_LEN * M3_INDEX_TOPK_BLOCKS)
-    var partial_ptr = arena_alloc_all[Float32](arenas, SEQ_LEN * BLOCK_STRIDE)
+        arenas, SEQ_LEN * M3_INDEX_NUM_HEADS * M3_INDEX_TOPK_BLOCKS)
+    var partial_ptr = arena_alloc_all[Float32](
+        arenas, SEQ_LEN * M3_INDEX_NUM_HEADS * BLOCK_STRIDE)
 
-    # Index-K is round-robin sharded by position: rank r's local row `lr` holds
-    # the key for global position g = lr*tp + r. The score decreases with g, so
-    # the merged global block score decreases with block id regardless of degree
-    # -- the expected top-k below is degree-independent, so a PASS at degree > 1
-    # proves the cross-rank merge reconstructs the single-node selection.
     for r in range(tp):
         var iq = view.bind(index_q_ptr)[r]
         for i in range(SEQ_LEN * Q_ROW):
@@ -88,7 +84,7 @@ def run_indexer[P: BurstThreadPool, //](
             for d in range(M3_INDEX_HEAD_DIM):
                 ik[lr * M3_INDEX_HEAD_DIM + d] = kval
         var bi = view.bind(block_idx_ptr)[r]
-        for i in range(SEQ_LEN * M3_INDEX_TOPK_BLOCKS):
+        for i in range(SEQ_LEN * M3_INDEX_NUM_HEADS * M3_INDEX_TOPK_BLOCKS):
             bi[i] = Int32(-2)
         _ = arenas[r].prefault(0, arenas[r].used())
 
@@ -112,6 +108,7 @@ def run_indexer[P: BurstThreadPool, //](
     var out = block_idx[0]
     var probe = [0, 1, 299, 2560, 4999]
     var topk = M3_INDEX_TOPK_BLOCKS
+    var heads = M3_INDEX_NUM_HEADS
     var ok = True
     for pi in range(len(probe)):
         var tok = probe[pi]
@@ -130,23 +127,25 @@ def run_indexer[P: BurstThreadPool, //](
             expected[ne] = Int32(nb - 1)
             ne += 1
 
-        var row = out + tok * topk
-        var line = String(t"tok={tok} blocks={nb} selected=[")
-        var row_ok = True
-        for k in range(topk):
-            var b = row[k]
-            if k > 0:
-                line += ", "
-            line += String(b)
-            if b != expected[k]:
-                row_ok = False
+        var line = String(t"tok={tok} blocks={nb} head0=[")
+        var tok_ok = True
+        for h in range(heads):
+            var row = out + (tok * heads + h) * topk
+            for k in range(topk):
+                var b = row[k]
+                if h == 0:
+                    if k > 0:
+                        line += ", "
+                    line += String(b)
+                if b != expected[k]:
+                    tok_ok = False
         line += "]  "
-        line += "ok" if row_ok else "MISMATCH"
+        line += "ok" if tok_ok else "MISMATCH"
         print(line)
-        if not row_ok:
+        if not tok_ok:
             ok = False
     if ok:
-        print(t"smoke: PASS (degree={tp})")
+        print(t"smoke: PASS (degree={tp}, all {heads} heads match)")
     else:
         print(t"smoke: FAIL (degree={tp})")
 

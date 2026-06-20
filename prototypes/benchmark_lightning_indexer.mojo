@@ -32,7 +32,7 @@ comptime MAX_BLOCK = (MAX_CONTEXT - 1) // M3_INDEX_BLOCK + 1
 comptime BLOCK_STRIDE = (MAX_BLOCK + 15) // 16 * 16
 comptime PREFILL_BLOCK = (MAX_PREFILL - 1) // M3_INDEX_BLOCK + 1
 comptime PREFILL_STRIDE = (PREFILL_BLOCK + 15) // 16 * 16
-comptime PARTIAL_ELEMS = MAX_PREFILL * PREFILL_STRIDE
+comptime PARTIAL_ELEMS = MAX_PREFILL * M3_INDEX_NUM_HEADS * PREFILL_STRIDE
 comptime BF16Ptr = UnsafePointer[BFloat16, MutAnyOrigin]
 
 
@@ -201,7 +201,7 @@ def run_all[P: BurstThreadPool, //](
     var index_k_ptr = arena_alloc_all[BFloat16](
         arenas, MAX_CONTEXT * M3_INDEX_HEAD_DIM)
     var block_idx_ptr = arena_alloc_all[Int32](
-        arenas, MAX_PREFILL * M3_INDEX_TOPK_BLOCKS)
+        arenas, MAX_PREFILL * M3_INDEX_NUM_HEADS * M3_INDEX_TOPK_BLOCKS)
     var partial_ptr = arena_alloc_all[Float32](arenas, PARTIAL_ELEMS)
 
     for r in range(tp):

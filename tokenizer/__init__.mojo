@@ -6,5 +6,5 @@ from .deepseek_v3 import *
 from .gpt_oss import *
 from .gemma4 import *
 from .NFC import *
-from .minimax_m27 import *
+from .minimax_m3 import *
 from .stream import *

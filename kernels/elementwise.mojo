@@ -123,3 +123,57 @@ def dispatch_scalar_mul[
     fanout_dispatch[make, max_worker_count=max_worker_count, label="scalar_mul"](
         pools, prof, seq_len, seq_len * hidden * 4,
         inline_threshold_bytes=SCALAR_MUL_INLINE_TOKENS * hidden * 4)
+
+
+@always_inline
+def residual_add_row[hidden: Int](
+    a: BF16Ptr, b: BF16Ptr, dst: BF16Ptr,
+):
+    def step[width: Int](idx: Int) {read}:
+        var x = (a + idx).load[width=width]().cast[DType.float32]()
+        var y = (b + idx).load[width=width]().cast[DType.float32]()
+        (dst + idx).store((x + y).cast[DType.bfloat16]())
+
+    vectorize[W](hidden, step)
+
+
+@fieldwise_init
+struct ResidualAddTokenKernel[hidden: Int](RangePartitionedKernel):
+    var a: BF16Ptr
+    var b: BF16Ptr
+    var dst: BF16Ptr
+    var start: Int
+    var end: Int
+
+    def execute(mut self):
+        for tok in range(self.start, self.end):
+            var off = tok * Self.hidden
+            residual_add_row[Self.hidden](
+                self.a + off, self.b + off, self.dst + off)
+
+    @always_inline
+    def install_range(mut self, start: Int, end: Int):
+        self.start = start
+        self.end = end
+
+
+def dispatch_residual_add[
+    P: BurstThreadPool, Profile: Bool, N: Int, o: ImmutOrigin, //,
+    hidden: Int, max_worker_count: Int = 128,
+](
+    a: Binding[BFloat16, o],
+    b: Binding[BFloat16, o],
+    dst: Binding[BFloat16, o],
+    seq_len: Int,
+    mut pools: List[P],
+    mut prof: Profiler[Profile, N],
+):
+    comptime K = ResidualAddTokenKernel[hidden]
+
+    @parameter
+    def make(r: Int) -> K:
+        return K(a[r], b[r], dst[r], 0, 0)
+
+    fanout_dispatch[make, max_worker_count=max_worker_count, label="residual_add"](
+        pools, prof, seq_len, seq_len * hidden * 4,
+        inline_threshold_bytes=SCALAR_MUL_INLINE_TOKENS * hidden * 4)

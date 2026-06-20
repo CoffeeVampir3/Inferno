@@ -14,7 +14,7 @@ MiniMax-M3 is a native multimodal (image/video/text) Mixture-of-Experts model: a
 - 64 query heads, 4 key/value heads, head dimension 128 (grouped-query attention, KV expansion 16).
 - Partial RoPE on the first 64 of each 128 head dimensions; per-head Q/K RMSNorm.
 - Gemma-style `(1 + weight)` RMSNorm throughout (`use_gemma_norm`).
-- MSA sparse attention on layers 3-59 via a 4-head lightning indexer selecting top-16 key blocks of 128 tokens.
+- MSA sparse attention on layers 3-59 via a 4-head lightning indexer (one index head per key/value head) selecting, per head, top-16 key blocks of 128 tokens.
 - 128 experts per MoE layer, top-4 routing, plus 1 shared expert. SwiGLU-OAI (GPT-OSS-style clamped) experts, intermediate size 3072.
 - Dense MLP layers use SwiGLU-OAI with intermediate size 12288.
 - Untied token embedding and LM head; vocab 200064.
@@ -187,15 +187,15 @@ Each sparse layer carries a **lightning indexer** (`self_attn.index_*`), a selec
 - `index_q_norm`, `index_k_norm`: `(128,)` Gemma RMSNorm, applied per index head before RoPE.
 - The indexer has **no value projection and produces no residual output** (`sparse_disable_index_value=1` on every sparse layer).
 
-Indexer selection per query:
+Indexer selection runs per query **and per index head** — there are `index_n_heads = 4` index heads, exactly one per key/value head:
 
-1. Project hidden states to index Q `(B, 4, S, 128)` and index K `(B, 1, S, 128)`; normalize and apply partial RoPE (first 128 dims, i.e. the full index head dim).
-2. Score every (query, key) pair: `scores = idx_q · idx_kᵀ` in float32; mask future keys to `-inf`.
-3. Pool keys into blocks of `sparse_block_size=128`: take the max score within each block, then the max across the 4 index heads, giving a per-query, per-block score.
-4. Always-keep the `sparse_local_block=1` block(s) immediately preceding the query (their score is boosted to `+inf`).
-5. Keep the top `sparse_topk_blocks=16` blocks per query; future/empty blocks sort to the end and are tagged `-1` (left-packed indices, `-1` right-padding) — the format the block-sparse attention kernel consumes.
+1. Project hidden states to index Q `(B, 4, S, 128)` and index K `(B, 1, S, 128)`; normalize and apply partial RoPE (first 128 dims, i.e. the full index head dim). The single index-key head is shared across all four index-query heads.
+2. Score every (query, key) pair, per head: `scores[h] = idx_q[h] · idx_kᵀ` in float32; mask future keys to `-inf`.
+3. Pool keys into blocks of `sparse_block_size=128`: take the max score within each block (`sparse_score_type="max"`), giving a per-(query, head, block) score. The four index heads are kept separate — there is no reduction across index heads.
+4. Per head, always-keep the `sparse_local_block=1` block(s) immediately preceding the query (their score is boosted to `+inf`).
+5. Per head, keep the top `sparse_topk_blocks=16` blocks; future/empty blocks sort to the end and are tagged `-1` (left-packed indices, `-1` right-padding) — the format the block-sparse attention kernel consumes. The output is one independent selection per index head: `[num_kv_heads, S_q, 16]`.
 
-The main attention then computes softmax attention with scale `1/sqrt(128)` only over the selected key blocks. On the `eager`/`sdpa` path the block indices are expanded into a dense additive `[B, 1, S_q, S_k]` mask (`0` on kept (query,key) pairs, `-inf` elsewhere) by `build_block_mask`. Block boundaries are anchored to absolute key slots, so only right-padding is equivalent to an unpadded run (a documented limitation shared with DeepSeek-V4).
+Because `index_n_heads == num_key_value_heads`, index head `h` produces the block selection for key/value head `h`. The main block-sparse attention computes softmax attention with scale `1/sqrt(128)`, and each KV head attends only the key blocks its own index head selected (the 16 query heads sharing that KV head reuse that selection). Different KV heads attend different block sets, so a single query reaches up to `num_key_value_heads * sparse_topk_blocks = 64` distinct key blocks. Block boundaries are anchored to absolute key slots, so only right-padding is equivalent to an unpadded run (a documented limitation shared with DeepSeek-V4).
 
 The dense layers 0-2 (`layer_types[i]=="full_attention"`) have no indexer and run ordinary dense causal attention.
 
@@ -387,7 +387,7 @@ A checkpoint-matching implementation reproduces these facts:
 - Layers 0-2: full causal attention + dense SwiGLU-OAI MLP (inter 12288).
 - Layers 3-59: MSA block-sparse attention + MoE.
 - Attention: 64 Q heads, 4 KV heads, head dim 128; per-head Gemma Q/K RMSNorm; partial RoPE on the first 64 dims; base 5e6.
-- MSA: 4-head lightning indexer (single shared index-key head, index dim 128), max-pool keys into 128-token blocks, max over heads, always keep 1 local block, select top-16 blocks per query; indexer is selection-only (no value path).
+- MSA: 4-head lightning indexer (single shared index-key head, index dim 128, one index head per KV head), max-pool keys into 128-token blocks per head with no reduction across index heads, always keep 1 local block, select top-16 blocks per head; each KV head attends only its own index head's selected blocks. Indexer is selection-only (no value path).
 - MoE: float32 sigmoid router, additive `e_score_correction_bias` for selection, top-4, renormalize raw sigmoid weights, scale routed sum by 2.0, add 1 shared expert (inter 3072), routed expert inter 3072.
 - SwiGLU-OAI activation everywhere in the MLPs: `gate ≤ 7`, `up ∈ [-7,7]`, `glu = gate·σ(1.702·gate)`, `out = down((up+1)·glu)`.
 - Gemma-style `(1 + weight)` RMSNorm, eps 1e-6.

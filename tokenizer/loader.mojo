@@ -24,9 +24,9 @@ from .gemma4 import (
     Gemma4ByteTransform, Gemma4PreTokenizer,
     pre_tokenize_gemma4, gemma4_encode_bytes, gemma4_decode_bytes,
 )
-from .minimax_m27 import (
-    MinimaxM27ByteTransform, MinimaxM27PreTokenizer,
-    pre_tokenize_minimax_m27,
+from .minimax_m3 import (
+    MinimaxM3ByteTransform, MinimaxM3PreTokenizer,
+    pre_tokenize_minimax_m3,
 )
 
 
@@ -35,7 +35,7 @@ comptime TOKENIZER_FLAVOR_GPT2 = 1
 comptime TOKENIZER_FLAVOR_DEEPSEEK_V3 = 2
 comptime TOKENIZER_FLAVOR_GPT_OSS = 3
 comptime TOKENIZER_FLAVOR_GEMMA4 = 4
-comptime TOKENIZER_FLAVOR_MINIMAX_M27 = 5
+comptime TOKENIZER_FLAVOR_MINIMAX_M3 = 5
 
 
 struct AutoPreTokenizer(PreTokenizerCapability):
@@ -53,8 +53,8 @@ struct AutoPreTokenizer(PreTokenizerCapability):
             return pre_tokenize_gpt_oss(text)
         if self.flavor == TOKENIZER_FLAVOR_GEMMA4:
             return pre_tokenize_gemma4(text)
-        if self.flavor == TOKENIZER_FLAVOR_MINIMAX_M27:
-            return pre_tokenize_minimax_m27(text)
+        if self.flavor == TOKENIZER_FLAVOR_MINIMAX_M3:
+            return pre_tokenize_minimax_m3(text)
 
         var out = List[String]()
         out.append(text.copy())
@@ -331,7 +331,7 @@ def is_gpt_oss_pretokenizer_signature(stages: List[PreTokenizerStageSignature]) 
     return True
 
 
-def is_minimax_m27_pretokenizer_signature(stages: List[PreTokenizerStageSignature]) -> Bool:
+def is_minimax_m3_pretokenizer_signature(stages: List[PreTokenizerStageSignature]) -> Bool:
     if len(stages) != 2:
         return False
 
@@ -403,8 +403,8 @@ def detect_tokenizer_flavor(path: Path) -> Int:
         return TOKENIZER_FLAVOR_DEEPSEEK_V3
     if is_gpt_oss_pretokenizer_signature(stages):
         return TOKENIZER_FLAVOR_GPT_OSS
-    if is_minimax_m27_pretokenizer_signature(stages):
-        return TOKENIZER_FLAVOR_MINIMAX_M27
+    if is_minimax_m3_pretokenizer_signature(stages):
+        return TOKENIZER_FLAVOR_MINIMAX_M3
     if is_gemma4_pretokenizer_signature(stages):
         return TOKENIZER_FLAVOR_GEMMA4
     return TOKENIZER_FLAVOR_UNSUPPORTED
@@ -816,11 +816,11 @@ def load_gemma4_tokenizer(path: Path) -> Optional[
     )
 
 
-def load_minimax_m27_tokenizer(path: Path) -> Optional[
-    BPETokenizer[MinimaxM27PreTokenizer, MinimaxM27ByteTransform]
+def load_minimax_m3_tokenizer(path: Path) -> Optional[
+    BPETokenizer[MinimaxM3PreTokenizer, MinimaxM3ByteTransform]
 ]:
     return load_tokenizer_with_capabilities(
         path,
-        MinimaxM27PreTokenizer(),
-        MinimaxM27ByteTransform(),
+        MinimaxM3PreTokenizer(),
+        MinimaxM3ByteTransform(),
     )

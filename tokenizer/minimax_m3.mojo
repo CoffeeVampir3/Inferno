@@ -3,12 +3,12 @@ from .gpt_oss import pre_tokenize_gpt_oss
 from .NFC import nfc_normalize
 
 
-struct MinimaxM27ByteTransform(ByteTransformCapability):
+struct MinimaxM3ByteTransform(ByteTransformCapability):
     def __init__(out self):
         pass
 
 
-struct MinimaxM27PreTokenizer(PreTokenizerCapability):
+struct MinimaxM3PreTokenizer(PreTokenizerCapability):
     def __init__(out self):
         pass
 
@@ -16,5 +16,5 @@ struct MinimaxM27PreTokenizer(PreTokenizerCapability):
         return pre_tokenize_gpt_oss(nfc_normalize(text))
 
 
-def pre_tokenize_minimax_m27(text: String) -> List[String]:
+def pre_tokenize_minimax_m3(text: String) -> List[String]:
     return pre_tokenize_gpt_oss(nfc_normalize(text))

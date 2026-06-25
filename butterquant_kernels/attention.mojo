@@ -5,7 +5,7 @@ from threading.threading_traits import BurstThreadPool
 from kernels.helpers import (
     BF16Ptr, F32Ptr, W, Binding, RangePartitionedKernel,
     WorkerRangePartitionedKernel, fanout_dispatch,
-    accumulate_scaled, scale_unrolled,
+    scale_unrolled,
 )
 from kernels.attention_ops import (
     KVSlot, KVRunTable, PagedKV, TILE, online_softmax_tile, zero_accumulators,
@@ -19,14 +19,9 @@ from kernels.dispatch_heuristics import ROPE_INLINE_TOKENS
 from kernels.profiling import Profiler
 
 from butterquant.convert import store_bf16
-from butterquant.dot_products import vnni_shifted_dot
+from butterquant.dot_products import vnni_panel_score_dot, bq_score_unroll
 from butterquant.head_prep import prep_head_qk_i8, prep_head_v_i8
 from butterquant.types import I8Ptr
-
-
-@always_inline
-def vnni_score_dot[head_dim: Int](k_i8: I8Ptr, q_i8: I8Ptr) -> Int32:
-    return vnni_shifted_dot[head_dim, False](k_i8, q_i8)[0].reduce_add()
 
 
 @always_inline
@@ -48,37 +43,63 @@ def bq_process_kv_tile[
 ):
     comptime inv127 = Float32(1.0) / Float32(127.0)
     comptime inv127sq = inv127 * inv127
+    comptime CU = bq_score_unroll[head_dim, gqa_ratio]()
+    debug_assert(num_q % gqa_ratio == 0, "bq_process_kv_tile needs whole gqa groups")
 
     var slots = InlineArray[Int, TILE](uninitialized=True)
     for t in range(tile_len):
         slots[t] = kv.slot(start_pos, pos + t)
 
-    for q_idx in range(num_q):
-        var kv_h = q_idx // gqa_ratio
+    var num_groups = num_q // gqa_ratio
+    var scores_mat = InlineArray[Float32, TILE * gqa_ratio](uninitialized=True)
+    var weights_mat = InlineArray[Float32, TILE * gqa_ratio](uninitialized=True)
 
-        var scores = SIMD[DType.float32, TILE](-1e30)
+    for g in range(num_groups):
+        var base_q = g * gqa_ratio
+        var head_off = g * head_dim
+        var kv_h = g
+
+        var group_q = InlineArray[I8Ptr, gqa_ratio](uninitialized=True)
+        comptime for r in range(gqa_ratio):
+            group_q[r] = q_ptrs[base_q + r]
+
         for t in range(tile_len):
             var s_idx = slots[t]
-            var k_head = k_base + s_idx * kv_stride + kv_h * head_dim
-            var r = vnni_score_dot[head_dim](k_head, q_ptrs[q_idx])
+            var k_head = k_base + s_idx * kv_stride + head_off
+            var raw = vnni_panel_score_dot[head_dim, gqa_ratio, CU](
+                k_head, group_q)
             var ks = k_scale[s_idx * num_kv + kv_h]
-            scores[t] = (Float32(r) - qi_bias[q_idx]) * f_q[q_idx] * ks * inv127sq
+            comptime for r in range(gqa_ratio):
+                var qi = base_q + r
+                scores_mat[t * gqa_ratio + r] = (
+                    (Float32(raw[r]) - qi_bias[qi]) * f_q[qi] * ks * inv127sq)
 
-        var sm = online_softmax_tile[TILE](scores, m[q_idx])
-        var m_new = sm[0]
-        var corr = sm[1]
-        var weights = sm[2]
-
-        scale_unrolled[cols=head_dim](acc_ptrs[q_idx], corr)
-        l[q_idx] = l[q_idx] * corr + weights.reduce_add()
-        m[q_idx] = m_new
+        comptime for r in range(gqa_ratio):
+            var qi = base_q + r
+            var scores = SIMD[DType.float32, TILE](-1e30)
+            for t in range(tile_len):
+                scores[t] = scores_mat[t * gqa_ratio + r]
+            var sm = online_softmax_tile[TILE](scores, m[qi])
+            scale_unrolled[cols=head_dim](acc_ptrs[qi], sm[1])
+            l[qi] = l[qi] * sm[1] + sm[2].reduce_add()
+            m[qi] = sm[0]
+            for t in range(tile_len):
+                weights_mat[t * gqa_ratio + r] = sm[2][t]
 
         for t in range(tile_len):
             var s_idx = slots[t]
-            var v_head = v_base + s_idx * kv_stride + kv_h * head_dim
+            var v_head = v_base + s_idx * kv_stride + head_off
             var vs = v_scale[s_idx * num_kv + kv_h]
-            accumulate_scaled[cols=head_dim](
-                v_head, weights[t] * vs * inv127, acc_ptrs[q_idx])
+            var wts = InlineArray[SIMD[DType.float32, W], gqa_ratio](
+                uninitialized=True)
+            comptime for r in range(gqa_ratio):
+                wts[r] = SIMD[DType.float32, W](
+                    weights_mat[t * gqa_ratio + r] * vs * inv127)
+            for j in range(0, head_dim, W):
+                var vv = (v_head + j).load[width=W]().cast[DType.float32]()
+                comptime for r in range(gqa_ratio):
+                    var aptr = acc_ptrs[base_q + r] + j
+                    aptr.store(vv.fma(wts[r], aptr.load[width=W]()))
 
 
 @fieldwise_init

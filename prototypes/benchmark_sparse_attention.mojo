@@ -22,9 +22,6 @@ from prototypes.sparse_attention import (
     dispatch_minimax_m3_sparse_attention,
     M3_NUM_HEADS, M3_NUM_KV_HEADS, M3_HEAD_DIM, M3_KV_DIM,
 )
-from prototypes.sparse_attention_reuse import (
-    dispatch_minimax_m3_sparse_attention_reuse,
-)
 
 
 comptime ALIGNMENT = 64
@@ -92,16 +89,6 @@ def attn_read_bytes(seq_len: Int, base_pos: Int) -> Int:
     return total
 
 
-def speedup_line(baseline_p50: Int64, reuse_p50: Int64) -> String:
-    if reuse_p50 <= 0:
-        return String("    speedup: n/a")
-    var x100 = baseline_p50 * 100 // reuse_p50
-    var whole = x100 // 100
-    var frac = x100 % 100
-    var pad = "0" if frac < 10 else ""
-    return String(t"    speedup (kernel p50): {whole}.{pad}{frac}x")
-
-
 @fieldwise_init
 struct FusedBuffers[o: ImmutOrigin](Copyable, ImplicitlyCopyable):
     var index_q: Binding[BFloat16, Self.o]
@@ -136,18 +123,6 @@ def run_attention[P: BurstThreadPool, o: ImmutOrigin, N: Int, //](
     mut prof: Profiler[False, N],
 ):
     dispatch_minimax_m3_sparse_attention[page_len=PAGE_LEN](
-        buf.q, buf.k, buf.v, buf.block_idx, buf.output, buf.attn_partial,
-        buf.segments, runs, seq_len, pools, prof)
-
-
-def run_attention_reuse[P: BurstThreadPool, o: ImmutOrigin, N: Int, //](
-    mut pools: List[P],
-    buf: FusedBuffers[o],
-    runs: UnsafePointer[KVRunTable, MutAnyOrigin],
-    seq_len: Int,
-    mut prof: Profiler[False, N],
-):
-    dispatch_minimax_m3_sparse_attention_reuse[page_len=PAGE_LEN](
         buf.q, buf.k, buf.v, buf.block_idx, buf.output, buf.attn_partial,
         buf.segments, runs, seq_len, pools, prof)
 
@@ -201,51 +176,6 @@ def section_validation[P: BurstThreadPool, o: ImmutOrigin, //](
     print("  ", "OK" if (sel_ok and finite and changed) else "FAIL")
 
 
-def parity_pass[P: BurstThreadPool, o: ImmutOrigin, //](
-    mut pools: List[P],
-    buf: FusedBuffers[o],
-    runs: UnsafePointer[KVRunTable, MutAnyOrigin],
-    label: StringSlice,
-    base_pos: Int,
-    seq_len: Int,
-):
-    var prof = Profiler[False]()
-    runs[].runs[0].base_pos = Int32(base_pos)
-    var total = seq_len * ATTN_Q_ROW
-
-    run_indexer(pools, buf, runs, seq_len, prof)
-    run_attention(pools, buf, runs, seq_len, prof)
-    var ob = buf.output[0]
-    var saved = List[Float32](capacity=total)
-    for i in range(total):
-        saved.append(ob[i].cast[DType.float32]())
-
-    run_attention_reuse(pools, buf, runs, seq_len, prof)
-    var max_abs = Float32(0)
-    var max_rel = Float32(0)
-    for i in range(total):
-        var a = saved[i]
-        var b = ob[i].cast[DType.float32]()
-        var d = abs(a - b)
-        if d > max_abs:
-            max_abs = d
-        var denom = abs(a) if abs(a) > Float32(1e-6) else Float32(1e-6)
-        var rel = d / denom
-        if rel > max_rel:
-            max_rel = rel
-    print(t"  {label}: n={total} max_abs={max_abs} max_rel={max_rel}")
-
-
-def section_parity[P: BurstThreadPool, o: ImmutOrigin, //](
-    mut pools: List[P],
-    buf: FusedBuffers[o],
-    runs: UnsafePointer[KVRunTable, MutAnyOrigin],
-):
-    print("\n=== Parity: baseline vs K/V-reuse (final merged output) ===")
-    parity_pass(pools, buf, runs, "decode  ctx=65536", 65535, 1)
-    parity_pass(pools, buf, runs, "prefill seq=128  ", 0, 128)
-
-
 def section_decode_sweep[P: BurstThreadPool, o: ImmutOrigin, //](
     mut pools: List[P],
     buf: FusedBuffers[o],
@@ -255,7 +185,6 @@ def section_decode_sweep[P: BurstThreadPool, o: ImmutOrigin, //](
     var contexts = [1024, 4096, 16384, 65536, 131072]
     var s_idx = SampleBuffer(SAMPLES)
     var s_attn = SampleBuffer(SAMPLES)
-    var s_reuse = SampleBuffer(SAMPLES)
     var s_fused = SampleBuffer(SAMPLES)
     var prof = Profiler[False]()
 
@@ -268,7 +197,6 @@ def section_decode_sweep[P: BurstThreadPool, o: ImmutOrigin, //](
         for _ in range(WARMUP):
             run_indexer(pools, buf, runs, 1, prof)
             run_attention(pools, buf, runs, 1, prof)
-            run_attention_reuse(pools, buf, runs, 1, prof)
             keep(buf.output[0][0])
 
         s_idx.clear()
@@ -287,14 +215,6 @@ def section_decode_sweep[P: BurstThreadPool, o: ImmutOrigin, //](
             s_attn.push(max_last_ts(pools) - t0, t1 - t0)
         keep(buf.output[0][0])
 
-        s_reuse.clear()
-        for _ in range(SAMPLES):
-            var t0 = now_ns()
-            run_attention_reuse(pools, buf, runs, 1, prof)
-            var t1 = now_ns()
-            s_reuse.push(max_last_ts(pools) - t0, t1 - t0)
-        keep(buf.output[0][0])
-
         s_fused.clear()
         for _ in range(SAMPLES):
             var t0 = now_ns()
@@ -306,17 +226,13 @@ def section_decode_sweep[P: BurstThreadPool, o: ImmutOrigin, //](
 
         var idx_b = indexer_scan_bytes(1, ctx - 1)
         var attn_b = attn_read_bytes(1, ctx - 1)
-        var attn_st = compute_stats(s_attn.kernel_ns, s_attn.n)
-        var reuse_st = compute_stats(s_reuse.kernel_ns, s_reuse.n)
         print(t"ctx={ctx}")
         print_row("  indexer  ",
             compute_stats(s_idx.kernel_ns, s_idx.n),
             compute_stats(s_idx.wall_ns, s_idx.n), idx_b)
         print_row("  attention",
-            attn_st, compute_stats(s_attn.wall_ns, s_attn.n), attn_b)
-        print_row("  attn-reuse",
-            reuse_st, compute_stats(s_reuse.wall_ns, s_reuse.n), attn_b)
-        print(speedup_line(attn_st.p50, reuse_st.p50))
+            compute_stats(s_attn.kernel_ns, s_attn.n),
+            compute_stats(s_attn.wall_ns, s_attn.n), attn_b)
         print_row("  fused    ",
             compute_stats(s_fused.kernel_ns, s_fused.n),
             compute_stats(s_fused.wall_ns, s_fused.n), idx_b + attn_b)
@@ -331,7 +247,6 @@ def section_prefill_sweep[P: BurstThreadPool, o: ImmutOrigin, //](
     var seqs = [256, 512, 1024, 2048, 4096]
     var s_idx = SampleBuffer(SAMPLES)
     var s_attn = SampleBuffer(SAMPLES)
-    var s_reuse = SampleBuffer(SAMPLES)
     var s_fused = SampleBuffer(SAMPLES)
     var prof = Profiler[False]()
 
@@ -344,7 +259,6 @@ def section_prefill_sweep[P: BurstThreadPool, o: ImmutOrigin, //](
         for _ in range(WARMUP):
             run_indexer(pools, buf, runs, n, prof)
             run_attention(pools, buf, runs, n, prof)
-            run_attention_reuse(pools, buf, runs, n, prof)
             keep(buf.output[0][0])
 
         s_idx.clear()
@@ -363,14 +277,6 @@ def section_prefill_sweep[P: BurstThreadPool, o: ImmutOrigin, //](
             s_attn.push(max_last_ts(pools) - t0, t1 - t0)
         keep(buf.output[0][0])
 
-        s_reuse.clear()
-        for _ in range(SAMPLES):
-            var t0 = now_ns()
-            run_attention_reuse(pools, buf, runs, n, prof)
-            var t1 = now_ns()
-            s_reuse.push(max_last_ts(pools) - t0, t1 - t0)
-        keep(buf.output[0][0])
-
         s_fused.clear()
         for _ in range(SAMPLES):
             var t0 = now_ns()
@@ -382,17 +288,13 @@ def section_prefill_sweep[P: BurstThreadPool, o: ImmutOrigin, //](
 
         var idx_b = indexer_scan_bytes(n, 0)
         var attn_b = attn_read_bytes(n, 0)
-        var attn_st = compute_stats(s_attn.kernel_ns, s_attn.n)
-        var reuse_st = compute_stats(s_reuse.kernel_ns, s_reuse.n)
         print(t"seq={n}")
         print_row("  indexer  ",
             compute_stats(s_idx.kernel_ns, s_idx.n),
             compute_stats(s_idx.wall_ns, s_idx.n), idx_b)
         print_row("  attention",
-            attn_st, compute_stats(s_attn.wall_ns, s_attn.n), attn_b)
-        print_row("  attn-reuse",
-            reuse_st, compute_stats(s_reuse.wall_ns, s_reuse.n), attn_b)
-        print(speedup_line(attn_st.p50, reuse_st.p50))
+            compute_stats(s_attn.kernel_ns, s_attn.n),
+            compute_stats(s_attn.wall_ns, s_attn.n), attn_b)
         print_row("  fused    ",
             compute_stats(s_fused.kernel_ns, s_fused.n),
             compute_stats(s_fused.wall_ns, s_fused.n), idx_b + attn_b)
@@ -463,7 +365,6 @@ def run_all[P: BurstThreadPool, //](
     var runs = UnsafePointer(to=runs_table).as_unsafe_any_origin()
 
     section_validation(pools, buf, runs)
-    section_parity(pools, buf, runs)
     section_decode_sweep(pools, buf, runs)
     section_prefill_sweep(pools, buf, runs)
 

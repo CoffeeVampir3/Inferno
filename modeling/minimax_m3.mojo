@@ -146,7 +146,7 @@ def build_layer_schedule() -> InlineArray[LayerEntry, C.NUM_LAYERS]:
 comptime LAYER_SCHEDULE = build_layer_schedule()
 
 
-def bake_gemma_gain_inplace(p: UnsafePointer[BFloat16, MutAnyOrigin], count: Int):
+def bake_minimax_gain_inplace(p: UnsafePointer[BFloat16, MutAnyOrigin], count: Int):
     comptime width = simd_width_of[DType.bfloat16]()
     var one = SIMD[DType.bfloat16, width](1.0)
     for j in range(0, count, width):
@@ -1199,32 +1199,32 @@ struct MinimaxM3[
                 var entry = LAYER_SCHEDULE[i]
                 if entry.kind == LayerKind.DENSE:
                     var lb = base + self.layout.dense.base(entry.local_idx)
-                    bake_gemma_gain_inplace(
+                    bake_minimax_gain_inplace(
                         self.layout.dense.proto.input_norm.at(lb), C.HIDDEN)
-                    bake_gemma_gain_inplace(
+                    bake_minimax_gain_inplace(
                         self.layout.dense.proto.post_attn_norm.at(lb), C.HIDDEN)
-                    bake_gemma_gain_inplace(
+                    bake_minimax_gain_inplace(
                         self.layout.dense.proto.attn.q_norm.at(lb), C.HEAD_DIM)
-                    bake_gemma_gain_inplace(
+                    bake_minimax_gain_inplace(
                         self.layout.dense.proto.attn.k_norm.at(lb), C.HEAD_DIM)
                 else:
                     var lb = base + self.layout.sparse.base(entry.local_idx)
-                    bake_gemma_gain_inplace(
+                    bake_minimax_gain_inplace(
                         self.layout.sparse.proto.input_norm.at(lb), C.HIDDEN)
-                    bake_gemma_gain_inplace(
+                    bake_minimax_gain_inplace(
                         self.layout.sparse.proto.post_attn_norm.at(lb), C.HIDDEN)
-                    bake_gemma_gain_inplace(
+                    bake_minimax_gain_inplace(
                         self.layout.sparse.proto.attn.q_norm.at(lb), C.HEAD_DIM)
-                    bake_gemma_gain_inplace(
+                    bake_minimax_gain_inplace(
                         self.layout.sparse.proto.attn.k_norm.at(lb), C.HEAD_DIM)
-                    bake_gemma_gain_inplace(
+                    bake_minimax_gain_inplace(
                         self.layout.sparse.proto.indexer.index_q_norm.at(lb),
                         C.INDEX_HEAD_DIM)
-                    bake_gemma_gain_inplace(
+                    bake_minimax_gain_inplace(
                         self.layout.sparse.proto.indexer.index_k_norm.at(lb),
                         C.INDEX_HEAD_DIM)
             var tail_base = base + self.layout.tail.base(0)
-            bake_gemma_gain_inplace(
+            bake_minimax_gain_inplace(
                 self.layout.tail.proto.final_norm.at(tail_base), C.HIDDEN)
 
     def quant_model_init(mut self):

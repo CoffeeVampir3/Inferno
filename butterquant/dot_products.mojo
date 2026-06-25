@@ -1,3 +1,4 @@
+from std.collections import InlineArray
 from std.sys import llvm_intrinsic
 from std.sys.info import CompilationTarget
 
@@ -35,6 +36,53 @@ def dot_loaded[width: Int](
     weights: SIMD[DType.int8, width * 4],
 ) -> SIMD[DType.int32, width]:
     return vpdpbusd[width](acc, act_bytes, weights)
+
+
+@always_inline
+def bq_score_unroll[head_dim: Int, gqa_ratio: Int]() -> Int:
+    comptime bytes = WI * 4
+    comptime chunks = head_dim // bytes
+    var cu = 1
+    while (
+        cu * 2 <= chunks
+        and (cu * 2) * gqa_ratio <= 28
+        and cu * gqa_ratio < 8
+        and head_dim % ((cu * 2) * bytes) == 0
+    ):
+        cu *= 2
+    return cu
+
+
+@always_inline
+def vnni_panel_score_dot[
+    block: Int, panel: Int, unroll: Int,
+](
+    k: I8Ptr,
+    read q_ptrs: InlineArray[I8Ptr, panel],
+) -> InlineArray[Int32, panel]:
+    comptime assert CompilationTarget.has_vnni(), (
+        "butterquant VNNI dot requires VNNI")
+    comptime bytes = WI * 4
+    comptime assert block % (unroll * bytes) == 0, (
+        "vnni_panel_score_dot: block must be a multiple of unroll*4*WI")
+    var accs = InlineArray[SIMD[DType.int32, WI], panel * unroll](
+        fill=SIMD[DType.int32, WI](0))
+    comptime STRIDE = unroll * bytes
+    for base in range(0, block, STRIDE):
+        comptime for u in range(unroll):
+            var off = base + u * bytes
+            var av = (k + off).bitcast[UInt8]().load[width=bytes]() ^ SIMD[
+                DType.uint8, bytes](0x80)
+            comptime for r in range(panel):
+                var bv = (q_ptrs[r] + off).load[width=bytes]()
+                accs[r * unroll + u] = vpdpbusd[WI](accs[r * unroll + u], av, bv)
+    var out = InlineArray[Int32, panel](uninitialized=True)
+    comptime for r in range(panel):
+        var s = SIMD[DType.int32, WI](0)
+        comptime for u in range(unroll):
+            s += accs[r * unroll + u]
+        out[r] = s.reduce_add()
+    return out
 
 
 @always_inline

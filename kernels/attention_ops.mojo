@@ -1,10 +1,10 @@
 from std.collections import InlineArray
 from std.memory import Span, UnsafePointer
 
-from simd_math import fast_exp_softmax_biased
+from simd_math import fast_exp_softmax_biased, pick_port_unroll
 
-from .dot_products import dot_to_scalar
-from .helpers import BF16Ptr, F32Ptr, W, accumulate_scaled, scale_unrolled
+from .dot_products import bf16_panel_dot_to_scalars
+from .helpers import BF16Ptr, F32Ptr, W, BW, scale_unrolled
 
 
 comptime TILE = W
@@ -179,6 +179,16 @@ def online_softmax_tile[
 
 
 @always_inline
+def reuse_panel_pu[head_dim: Int, gqa_ratio: Int]() -> Int:
+    comptime cap = pick_port_unroll[BW, head_dim]()
+    comptime budget_pu = 32 // gqa_ratio
+    var pu = 1
+    while pu * 2 <= cap and pu * 2 <= budget_pu and pu * gqa_ratio < 8:
+        pu *= 2
+    return pu
+
+
+@always_inline
 def process_kv_tile[
     max_q: Int, KV: KVSlot, //,
     head_dim: Int, gqa_ratio: Int,
@@ -192,28 +202,50 @@ def process_kv_tile[
     read acc_ptrs: InlineArray[F32Ptr, max_q],
     num_q: Int, kv_stride: Int,
 ):
+    debug_assert(num_q % gqa_ratio == 0, "process_kv_tile needs whole gqa groups")
+    comptime PU = reuse_panel_pu[head_dim, gqa_ratio]()
+
     var slots = InlineArray[Int, TILE](uninitialized=True)
     for t in range(tile_len):
         slots[t] = kv.slot(start_pos, pos + t)
 
-    for q_idx in range(num_q):
-        var kv_h = q_idx // gqa_ratio
+    var num_groups = num_q // gqa_ratio
+    var scores_mat = InlineArray[Float32, TILE * gqa_ratio](uninitialized=True)
+    var weights_mat = InlineArray[Float32, TILE * gqa_ratio](uninitialized=True)
 
-        var scores = SIMD[DType.float32, TILE](-1e30)
-        for t in range(tile_len):
-            var k_head = k_base + slots[t] * kv_stride + kv_h * head_dim
-            scores[t] = dot_to_scalar[head_dim](q_ptrs[q_idx], k_head)
+    for g in range(num_groups):
+        var base_q = g * gqa_ratio
+        var head_off = g * head_dim
 
-        var sm = online_softmax_tile[TILE](scores, m[q_idx])
-        var m_new = sm[0]
-        var corr = sm[1]
-        var weights = sm[2]
-
-        scale_unrolled[cols=head_dim](acc_ptrs[q_idx], corr)
-        l[q_idx] = l[q_idx] * corr + weights.reduce_add()
-        m[q_idx] = m_new
+        var group_q = InlineArray[BF16Ptr, gqa_ratio](uninitialized=True)
+        comptime for r in range(gqa_ratio):
+            group_q[r] = q_ptrs[base_q + r]
 
         for t in range(tile_len):
-            var v_head = v_base + slots[t] * kv_stride + kv_h * head_dim
-            accumulate_scaled[cols=head_dim](
-                v_head, weights[t], acc_ptrs[q_idx])
+            var k_head = k_base + slots[t] * kv_stride + head_off
+            var sc = bf16_panel_dot_to_scalars[cols=head_dim, port_unroll=PU](
+                k_head, group_q)
+            comptime for r in range(gqa_ratio):
+                scores_mat[t * gqa_ratio + r] = sc[r]
+
+        comptime for r in range(gqa_ratio):
+            var qi = base_q + r
+            var scores = SIMD[DType.float32, TILE](-1e30)
+            for t in range(tile_len):
+                scores[t] = scores_mat[t * gqa_ratio + r]
+            var sm = online_softmax_tile[TILE](scores, m[qi])
+            scale_unrolled[cols=head_dim](acc_ptrs[qi], sm[1])
+            l[qi] = l[qi] * sm[1] + sm[2].reduce_add()
+            m[qi] = sm[0]
+            for t in range(tile_len):
+                weights_mat[t * gqa_ratio + r] = sm[2][t]
+
+        for t in range(tile_len):
+            var v_head = v_base + slots[t] * kv_stride + head_off
+            for j in range(0, head_dim, W):
+                var vv = (v_head + j).load[width=W]().cast[DType.float32]()
+                comptime for r in range(gqa_ratio):
+                    var aptr = acc_ptrs[base_q + r] + j
+                    aptr.store(vv.fma(
+                        SIMD[DType.float32, W](weights_mat[t * gqa_ratio + r]),
+                        aptr.load[width=W]()))

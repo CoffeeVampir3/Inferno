@@ -1,7 +1,7 @@
 from std.collections import InlineArray
 
 from threading.threading_traits import BurstThreadPool
-from simd_math.ops import gelu_tanh_f32
+from .elementwise import gate_up_activate
 from .helpers import (
     RangePartitionedKernel, WorkerRangePartitionedKernel, Binding,
     BF16Ptr, F32Ptr, I32Ptr, W, BW,
@@ -15,6 +15,7 @@ from .profiling import Profiler
 @always_inline
 def emit_gate_up_panel[
     panel: Int, NR: Int, hidden: Int, intermediate: Int, tile_j: Int,
+    activation: StaticString = "gelu", alpha: Float32 = 0.0, limit: Float32 = 0.0,
 ](
     routes: SparseRoutePtr,
     x_normed: BF16Ptr,
@@ -63,13 +64,14 @@ def emit_gate_up_panel[
         for j_off in range(0, n_cols, W):
             var g = (src_g + j_off).load[width=W]()
             var u = (src_u + j_off).load[width=W]()
-            var v = gelu_tanh_f32[W](g) * u
+            var v = gate_up_activate[W, activation, alpha, limit](g, u)
             (bucket_row + j_off).store(v.cast[DType.bfloat16]())
 
 
 @fieldwise_init
 struct Phase1GateUpKernel[
     hidden: Int, gate_up_fused: Int, intermediate: Int,
+    activation: StaticString = "gelu", alpha: Float32 = 0.0, limit: Float32 = 0.0,
     tile_j: Int = 64, MR: Int = 4, NR: Int = 3,
 ](WorkerRangePartitionedKernel):
     """Column-partitioned gate/up projection. Each worker owns an
@@ -133,6 +135,8 @@ struct Phase1GateUpKernel[
                     emit_gate_up_panel[
                         panel=Self.MR, NR=ENR, hidden=Self.hidden,
                         intermediate=Self.intermediate, tile_j=Self.tile_j,
+                        activation=Self.activation, alpha=Self.alpha,
+                        limit=Self.limit,
                     ](
                         self.routes, self.x_normed, rec_lo + rec_block,
                         gate_w_base, up_w_base,
@@ -148,6 +152,8 @@ struct Phase1GateUpKernel[
                     emit_gate_up_panel[
                         panel=1, NR=ENR, hidden=Self.hidden,
                         intermediate=Self.intermediate, tile_j=Self.tile_j,
+                        activation=Self.activation, alpha=Self.alpha,
+                        limit=Self.limit,
                     ](
                         self.routes, self.x_normed, rec_lo + rec_block,
                         gate_w_base, up_w_base,
@@ -169,6 +175,7 @@ struct Phase1GateUpKernel[
 def dispatch_phase1_gate_up[
     P: BurstThreadPool, Profile: Bool, N: Int, o: ImmutOrigin, //,
     hidden: Int, gate_up_fused: Int, intermediate: Int,
+    activation: StaticString = "gelu", alpha: Float32 = 0.0, limit: Float32 = 0.0,
     tile_j: Int = 64, MR: Int = 4, NR: Int = 3, max_worker_count: Int = 128,
 ](
     x_normed: Binding[BFloat16, o],
@@ -182,7 +189,8 @@ def dispatch_phase1_gate_up[
     mut prof: Profiler[Profile, N],
 ):
     comptime K = Phase1GateUpKernel[
-        hidden, gate_up_fused, intermediate, tile_j, MR, NR,
+        hidden, gate_up_fused, intermediate, activation, alpha, limit,
+        tile_j, MR, NR,
     ]
     comptime n_strides = intermediate // W
     var epr = experts_per_rank

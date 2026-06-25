@@ -1,7 +1,7 @@
 from std.algorithm import vectorize
 
 from threading.threading_traits import BurstThreadPool
-from simd_math.ops import gelu_tanh_f32
+from simd_math.ops import gelu_tanh_f32, exp_f32
 from .helpers import (
     RangePartitionedKernel, Binding,
     fanout_dispatch,
@@ -14,20 +14,51 @@ from .profiling import Profiler
 
 
 @always_inline
-def gelu_gate_up_row(
+def swiglu_oai_activate[width: Int, alpha: Float32, limit: Float32](
+    g: SIMD[DType.float32, width], u: SIMD[DType.float32, width],
+) -> SIMD[DType.float32, width]:
+    var gc = min(g, SIMD[DType.float32, width](limit))
+    var uc = max(
+        SIMD[DType.float32, width](-limit),
+        min(u, SIMD[DType.float32, width](limit)))
+    var z = SIMD[DType.float32, width](alpha) * gc
+    var glu = gc / (SIMD[DType.float32, width](1.0) + exp_f32[width](-z))
+    return (uc + SIMD[DType.float32, width](1.0)) * glu
+
+
+@always_inline
+def gate_up_activate[
+    width: Int, activation: StaticString, alpha: Float32, limit: Float32,
+](
+    g: SIMD[DType.float32, width], u: SIMD[DType.float32, width],
+) -> SIMD[DType.float32, width]:
+    comptime if activation == "swiglu_oai":
+        return swiglu_oai_activate[width, alpha, limit](g, u)
+    elif activation == "gelu":
+        return gelu_tanh_f32[width](g) * u
+    else:
+        comptime assert False, (
+            "gate_up_activate: unknown activation (expected 'gelu' or"
+            " 'swiglu_oai')")
+
+
+@always_inline
+def gate_up_row[activation: StaticString, alpha: Float32, limit: Float32](
     gate: BF16Ptr, up: BF16Ptr, dst: BF16Ptr, intermediate: Int,
 ):
     def step[width: Int](idx: Int) {read}:
         var g = (gate + idx).load[width=width]().cast[DType.float32]()
         var u = (up + idx).load[width=width]().cast[DType.float32]()
-        var v = gelu_tanh_f32[width](g) * u
+        var v = gate_up_activate[width, activation, alpha, limit](g, u)
         (dst + idx).store(v.cast[DType.bfloat16]())
 
     vectorize[W](intermediate, step)
 
 
 @fieldwise_init
-struct GeluGateUpTokenKernel(RangePartitionedKernel):
+struct GateUpTokenKernel[
+    activation: StaticString, alpha: Float32, limit: Float32,
+](RangePartitionedKernel):
     var gate: BF16Ptr
     var up: BF16Ptr
     var dst: BF16Ptr
@@ -38,7 +69,7 @@ struct GeluGateUpTokenKernel(RangePartitionedKernel):
     def execute(mut self):
         for tok in range(self.start, self.end):
             var off = tok * self.intermediate
-            gelu_gate_up_row(
+            gate_up_row[Self.activation, Self.alpha, Self.limit](
                 self.gate + off, self.up + off, self.dst + off,
                 self.intermediate)
 
@@ -46,6 +77,31 @@ struct GeluGateUpTokenKernel(RangePartitionedKernel):
     def install_range(mut self, start: Int, end: Int):
         self.start = start
         self.end = end
+
+
+def dispatch_gate_up_act[
+    P: BurstThreadPool, Profile: Bool, N: Int, o: ImmutOrigin, //,
+    activation: StaticString, alpha: Float32 = 0.0, limit: Float32 = 0.0,
+    max_worker_count: Int = 128,
+](
+    gate: Binding[BFloat16, o],
+    up: Binding[BFloat16, o],
+    dst: Binding[BFloat16, o],
+    intermediate: Int,
+    seq_len: Int,
+    mut pools: List[P],
+    mut prof: Profiler[Profile, N],
+):
+    comptime K = GateUpTokenKernel[activation, alpha, limit]
+    var ip = intermediate
+
+    @parameter
+    def make(r: Int) -> K:
+        return K(gate[r], up[r], dst[r], ip, 0, 0)
+
+    fanout_dispatch[make, max_worker_count=max_worker_count, label="gate_up"](
+        pools, prof, seq_len, seq_len * intermediate * 6,
+        inline_threshold_bytes=GELU_GATE_UP_INLINE_TOKENS * intermediate * 6)
 
 
 def dispatch_gelu_gate_up[
@@ -60,15 +116,9 @@ def dispatch_gelu_gate_up[
     mut pools: List[P],
     mut prof: Profiler[Profile, N],
 ):
-    var ip = intermediate
-
-    @parameter
-    def make(r: Int) -> GeluGateUpTokenKernel:
-        return GeluGateUpTokenKernel(gate[r], up[r], dst[r], ip, 0, 0)
-
-    fanout_dispatch[make, max_worker_count=max_worker_count, label="gelu_gate_up"](
-        pools, prof, seq_len, seq_len * intermediate * 6,
-        inline_threshold_bytes=GELU_GATE_UP_INLINE_TOKENS * intermediate * 6)
+    dispatch_gate_up_act[
+        activation="gelu", max_worker_count=max_worker_count,
+    ](gate, up, dst, intermediate, seq_len, pools, prof)
 
 
 @always_inline

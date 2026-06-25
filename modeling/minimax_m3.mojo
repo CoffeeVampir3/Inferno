@@ -25,7 +25,8 @@ from kernels.embedding import dispatch_embed_lookup
 from kernels.rmsnorm import dispatch_rms_norm, dispatch_rms_norm_qkv_heads
 from kernels.gemm import dispatch_gemm, dispatch_gemm_cols
 from kernels.attention_dispatch_kernels import dispatch_full_attention
-from kernels.elementwise import dispatch_residual_add
+from kernels.elementwise import dispatch_residual_add, dispatch_gate_up_act
+from kernels.moe_experts import dispatch_phase1_gate_up, dispatch_phase2_down
 
 from modeling.temporal_scratch import (
     ScratchBuffer, ScratchIsland, ScratchPhaseOrder, ScratchPhase, ScaleClass,
@@ -52,11 +53,9 @@ from modeling.kv_policy import (
     KVPoolMirror, pool_specs, dispatch_prefix_copies, bind_pool_run_table,
     kv_components,
 )
-from prototypes.swiglu_oai import dispatch_minimax_m3_swiglu_gate_up
 from prototypes.sigmoid_router import (
     M3RouterCandidate, dispatch_minimax_m3_router,
 )
-from prototypes.moe_experts_oai import dispatch_minimax_m3_moe_experts
 from prototypes.lightning_indexer import dispatch_minimax_m3_indexer
 from prototypes.sparse_attention import dispatch_minimax_m3_sparse_attention
 from quant.recipe import (
@@ -882,6 +881,10 @@ def dispatch_msa_attention_qkv[
         pools, prof)
 
 
+comptime M3_SWIGLU_ALPHA = Float32(1.702)
+comptime M3_SWIGLU_LIMIT = Float32(7.0)
+
+
 def dispatch_swiglu_oai_gate_up[
     P: BurstThreadPool, Profile: Bool, N: Int, o: ImmutOrigin, //,
     max_worker_count: Int = 128,
@@ -894,8 +897,10 @@ def dispatch_swiglu_oai_gate_up[
     mut pools: List[P],
     mut prof: Profiler[Profile, N],
 ):
-    dispatch_minimax_m3_swiglu_gate_up[max_worker_count=max_worker_count](
-        gate, up, dst, intermediate, seq_len, pools, prof)
+    dispatch_gate_up_act[
+        activation="swiglu_oai", alpha=M3_SWIGLU_ALPHA, limit=M3_SWIGLU_LIMIT,
+        max_worker_count=max_worker_count,
+    ](gate, up, dst, intermediate, seq_len, pools, prof)
 
 
 def dispatch_dense_mlp[
@@ -998,13 +1003,19 @@ def dispatch_moe[
     ](route_idx, route_w, expert_offset, routes,
       experts_per_rank, seq_len, pools, prof)
 
-    dispatch_minimax_m3_moe_experts[
+    dispatch_phase1_gate_up[
+        hidden=C.HIDDEN, gate_up_fused=2 * C.MOE_INTERMEDIATE,
+        intermediate=C.MOE_INTERMEDIATE,
+        activation="swiglu_oai", alpha=M3_SWIGLU_ALPHA, limit=M3_SWIGLU_LIMIT,
+        max_worker_count=max_worker_count,
+    ](x_input, expert_offset, routes, moe.experts_gate_up.binding(ctx),
+      gate_scratch, hidden_bucket, experts_per_rank, pools, prof)
+
+    dispatch_phase2_down[
         hidden=C.HIDDEN, intermediate=C.MOE_INTERMEDIATE,
         max_worker_count=max_worker_count,
-    ](x_input, expert_offset, routes,
-      moe.experts_gate_up.binding(ctx), moe.experts_down.binding(ctx),
-      gate_scratch, hidden_bucket, moe_accum, moe_out,
-      experts_per_rank, seq_len, pools, prof)
+    ](expert_offset, routes, hidden_bucket, moe.experts_down.binding(ctx),
+      moe_accum, moe_out, experts_per_rank, seq_len, pools, prof)
 
     dispatch_allreduce_inplace[BF16, max_worker_count=max_worker_count](
         moe_out, seq_len * C.HIDDEN, pools, prof)

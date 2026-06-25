@@ -111,7 +111,7 @@ def emit_reads(
         var data_bytes = desc.data_rows * desc.data_cols * desc.element_bytes
         ops.append(ReadOp(
             file_idx=file_idx, offset=file_data_start, length=data_bytes,
-            dest=UnsafePointer[UInt8, MutAnyOrigin](unsafe_from_address=dest),
+            dest=UnsafePointer[UInt8, MutUntrackedOrigin](unsafe_from_address=dest),
             id=len(ops),
         ))
     elif desc.data_rows != desc.global_rows:
@@ -124,7 +124,7 @@ def emit_reads(
             var file_off = file_data_start + row_start * desc.global_cols * desc.element_bytes
             ops.append(ReadOp(
                 file_idx=file_idx, offset=file_off, length=data_bytes,
-                dest=UnsafePointer[UInt8, MutAnyOrigin](unsafe_from_address=dest),
+                dest=UnsafePointer[UInt8, MutUntrackedOrigin](unsafe_from_address=dest),
                 id=len(ops),
             ))
     else:
@@ -142,7 +142,7 @@ def emit_reads(
                 var dst = dest + r * stride_bytes
                 ops.append(ReadOp(
                     file_idx=file_idx, offset=src, length=real_row_bytes,
-                    dest=UnsafePointer[UInt8, MutAnyOrigin](unsafe_from_address=dst),
+                    dest=UnsafePointer[UInt8, MutUntrackedOrigin](unsafe_from_address=dst),
                     id=len(ops),
                 ))
 

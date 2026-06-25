@@ -45,24 +45,24 @@ struct WorkerStackHead[mask_size: Int]:
     var slot_base: Int
     var parent_fs: Int
     var worker_id: Int
-    var mailbox: UnsafePointer[WorkerMailbox, MutAnyOrigin]
-    var join_flag: UnsafePointer[JoinFlag, MutAnyOrigin]
-    var shared: UnsafePointer[SharedState, MutAnyOrigin]
+    var mailbox: UnsafePointer[WorkerMailbox, MutUntrackedOrigin]
+    var join_flag: UnsafePointer[JoinFlag, MutUntrackedOrigin]
+    var shared: UnsafePointer[SharedState, MutUntrackedOrigin]
     var altstack_base: Int
     var altstack_size: Int
     var cpu_mask: CpuMask[Self.mask_size]
 
 
 struct WorkerSlot(Movable):
-    var base: UnsafePointer[UInt8, MutAnyOrigin]
-    var child_tid: UnsafePointer[Int32, MutAnyOrigin]
-    var stack_top: UnsafePointer[UInt8, MutAnyOrigin]
+    var base: UnsafePointer[UInt8, MutUntrackedOrigin]
+    var child_tid: UnsafePointer[Int32, MutUntrackedOrigin]
+    var stack_top: UnsafePointer[UInt8, MutUntrackedOrigin]
 
     def __init__(out self, slot_base: Int):
-        self.base = UnsafePointer[UInt8, MutAnyOrigin](unsafe_from_address=slot_base)
-        self.child_tid = UnsafePointer[Int32, MutAnyOrigin](
+        self.base = UnsafePointer[UInt8, MutUntrackedOrigin](unsafe_from_address=slot_base)
+        self.child_tid = UnsafePointer[Int32, MutUntrackedOrigin](
             unsafe_from_address=slot_base + SlotLayout.CHILD_TID)
-        self.stack_top = UnsafePointer[UInt8, MutAnyOrigin](
+        self.stack_top = UnsafePointer[UInt8, MutUntrackedOrigin](
             unsafe_from_address=slot_base + SlotLayout.HEADER + SlotLayout.GUARD)
 
 
@@ -74,13 +74,13 @@ struct IsolatedBurstPool[mask_size: Int = 128](BurstThreadPool):
     """
     # Worker-side (on worker's NUMA node)
     var slots: List[WorkerSlot]
-    var mailboxes: UnsafePointer[WorkerMailbox, MutAnyOrigin]
-    var shared: UnsafePointer[SharedState, MutAnyOrigin]
+    var mailboxes: UnsafePointer[WorkerMailbox, MutUntrackedOrigin]
+    var shared: UnsafePointer[SharedState, MutUntrackedOrigin]
     var worker_arena: Int
     var worker_arena_size: Int
 
     # Main-thread-side (on main's NUMA node)
-    var join_flags: UnsafePointer[JoinFlag, MutAnyOrigin]
+    var join_flags: UnsafePointer[JoinFlag, MutUntrackedOrigin]
     var join_arena: Int
     var join_arena_size: Int
 
@@ -109,9 +109,9 @@ struct IsolatedBurstPool[mask_size: Int = 128](BurstThreadPool):
         self.worker_arena_size = 0
         self.join_arena = 0
         self.join_arena_size = 0
-        self.mailboxes = UnsafePointer[WorkerMailbox, MutAnyOrigin].unsafe_dangling()
-        self.shared = UnsafePointer[SharedState, MutAnyOrigin].unsafe_dangling()
-        self.join_flags = UnsafePointer[JoinFlag, MutAnyOrigin].unsafe_dangling()
+        self.mailboxes = UnsafePointer[WorkerMailbox, MutUntrackedOrigin].unsafe_dangling()
+        self.shared = UnsafePointer[SharedState, MutUntrackedOrigin].unsafe_dangling()
+        self.join_flags = UnsafePointer[JoinFlag, MutUntrackedOrigin].unsafe_dangling()
 
         var sys = linux.linux_sys()
 
@@ -137,10 +137,11 @@ struct IsolatedBurstPool[mask_size: Int = 128](BurstThreadPool):
                 return
 
         var shared_addr = self.worker_arena + self.slot_size * capacity
-        self.shared = ptr[SharedState](shared_addr)
+        self.shared = UnsafePointer[SharedState, MutUntrackedOrigin](unsafe_from_address=shared_addr)
         self.shared[] = SharedState()
 
-        self.mailboxes = ptr[WorkerMailbox](shared_addr + size_of[SharedState]())
+        self.mailboxes = UnsafePointer[WorkerMailbox, MutUntrackedOrigin](
+            unsafe_from_address=shared_addr + size_of[SharedState]())
         for i in range(capacity):
             (self.mailboxes + i)[] = WorkerMailbox()
 
@@ -172,7 +173,7 @@ struct IsolatedBurstPool[mask_size: Int = 128](BurstThreadPool):
             return
 
         # No mbind — stays on the allocating (main) thread's node by first-touch
-        self.join_flags = ptr[JoinFlag](self.join_arena)
+        self.join_flags = UnsafePointer[JoinFlag, MutUntrackedOrigin](unsafe_from_address=self.join_arena)
         for i in range(capacity):
             (self.join_flags + i)[] = JoinFlag()
 

@@ -174,7 +174,7 @@ def gemm_i8_per_row_panel[K: Int, PR: Int, Out: DType](
     wpacked: I8Ptr,
     wsc: F32Ptr,
     colsum: F32Ptr,
-    dst: UnsafePointer[Scalar[Out], MutAnyOrigin],
+    dst: UnsafePointer[Scalar[Out], MutUntrackedOrigin],
     ns: Int,
 ):
     comptime width = simd_width_of[DType.int32]()
@@ -204,7 +204,7 @@ def gemm_i8_per_row[K: Int, MR: Int, Out: DType](
     wpacked: I8Ptr,
     wsc: F32Ptr,
     colsum: F32Ptr,
-    dst: UnsafePointer[Scalar[Out], MutAnyOrigin],
+    dst: UnsafePointer[Scalar[Out], MutUntrackedOrigin],
     start_tile: Int,
     end_tile: Int,
 ):
@@ -233,7 +233,7 @@ def gemm_i8_per_block_panel[N: Int, block: Int, PR: Int, Out: DType](
     wpacked: I8Ptr,
     wsc: F32Ptr,
     colsum: F32Ptr,
-    dst: UnsafePointer[Scalar[Out], MutAnyOrigin],
+    dst: UnsafePointer[Scalar[Out], MutUntrackedOrigin],
     ns: Int,
 ):
     comptime width = simd_width_of[DType.int32]()
@@ -277,7 +277,7 @@ def gemm_i8_per_block[N: Int, block: Int, MR: Int, Out: DType](
     wpacked: I8Ptr,
     wsc: F32Ptr,
     colsum: F32Ptr,
-    dst: UnsafePointer[Scalar[Out], MutAnyOrigin],
+    dst: UnsafePointer[Scalar[Out], MutUntrackedOrigin],
     start_tile: Int,
     end_tile: Int,
 ):

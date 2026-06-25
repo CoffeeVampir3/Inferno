@@ -85,8 +85,8 @@ struct BqFlashSampleKernel[
     var x_sa: F32Ptr
     var weight: I8Ptr
     var wscales: F32Ptr
-    var accums: UnsafePointer[SampleAccum[Self.n_max], MutAnyOrigin]
-    var params: UnsafePointer[SamplingParams, MutAnyOrigin]
+    var accums: UnsafePointer[SampleAccum[Self.n_max], MutUntrackedOrigin]
+    var params: UnsafePointer[SamplingParams, MutUntrackedOrigin]
     var num_rows: Int
     var rank_base: Int
     var row_base: Int
@@ -134,7 +134,7 @@ def dispatch_bq_flash_sample[
     weight: ButterquantWeight[quant, o],
     accums: Binding[SampleAccum[n_max], o],
     params: Binding[SamplingParams, o],
-    outcome: UnsafePointer[SampleOutcome[n_max], MutAnyOrigin],
+    outcome: UnsafePointer[SampleOutcome[n_max], MutUntrackedOrigin],
     num_rows: Int,
     vocab_per_rank: Int,
     mut pools: List[P],

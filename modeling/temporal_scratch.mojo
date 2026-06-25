@@ -278,21 +278,21 @@ struct TemporalScratchPool(Movable, Copyable, ImplicitlyCopyable):
     def slot[
         I: ScratchIsland, name: StringLiteral,
     ](self, arena_base: Int, plan: ScratchPlan) -> UnsafePointer[
-        downcast[reflect[I].field_type[name].T, ScratchBufferLike].Element,
-        MutAnyOrigin,
+        downcast[reflect[I].field[name].T, ScratchBufferLike].Element,
+        MutUntrackedOrigin,
     ]:
         comptime idx = reflect[I].field_index[name]()
         var off = plan.offsets[idx]
         return UnsafePointer[
-            downcast[reflect[I].field_type[name].T, ScratchBufferLike].Element,
-            MutAnyOrigin,
+            downcast[reflect[I].field[name].T, ScratchBufferLike].Element,
+            MutUntrackedOrigin,
         ](unsafe_from_address=arena_base + self.scratch_off + off)
 
     @always_inline
     def binding[
         I: ScratchIsland, name: StringLiteral, o: ImmutOrigin,
     ](self, ctx: BindContext[o], plan: ScratchPlan) -> Binding[
-        downcast[reflect[I].field_type[name].T, ScratchBufferLike].Element,
+        downcast[reflect[I].field[name].T, ScratchBufferLike].Element,
         o,
     ]:
         return ctx.view.bind(self.slot[I, name](ctx.view.bases[0], plan))

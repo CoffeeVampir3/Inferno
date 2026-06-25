@@ -9,7 +9,7 @@ from .profiling import Profiler
 struct GatherRowsKernel[cols: Int](RangePartitionedKernel):
     var src: BF16Ptr
     var dst: BF16Ptr
-    var rows: UnsafePointer[Int32, MutAnyOrigin]
+    var rows: UnsafePointer[Int32, MutUntrackedOrigin]
     var start: Int
     var end: Int
 

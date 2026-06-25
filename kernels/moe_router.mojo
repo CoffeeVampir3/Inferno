@@ -20,7 +20,7 @@ from .dot_products import dot_to_scalar
 from .profiling import Profiler, DispatchSpan
 
 
-comptime IntPtr = UnsafePointer[Int, MutAnyOrigin]
+comptime IntPtr = UnsafePointer[Int, MutUntrackedOrigin]
 comptime MAX_MERGE_TP = 64
 
 
@@ -36,8 +36,8 @@ struct SparseRoute(Copyable, ImplicitlyCopyable):
     var weight: Float32
 
 
-comptime RouterCandidatePtr = UnsafePointer[RouterCandidate, MutAnyOrigin]
-comptime SparseRoutePtr = UnsafePointer[SparseRoute, MutAnyOrigin]
+comptime RouterCandidatePtr = UnsafePointer[RouterCandidate, MutUntrackedOrigin]
+comptime SparseRoutePtr = UnsafePointer[SparseRoute, MutUntrackedOrigin]
 
 
 @always_inline
@@ -351,7 +351,7 @@ def dispatch_merge_router_candidates[
         total_sources += nws[r]
     var data_bytes = total_sources * seq_len * top_k * size_of[RouterCandidate]()
 
-    var nws_ptr = IntPtr(unsafe_from_address=Int(nws.unsafe_ptr()))
+    var nws_ptr = nws.unsafe_ptr().unsafe_mut_cast[True]().unsafe_origin_cast[MutUntrackedOrigin]()
     var per_node = (seq_len + tp - 1) // tp
     comptime MK = RouterMergeKernel[top_k, o]
     comptime GK = RouteGatherKernel[top_k, o]

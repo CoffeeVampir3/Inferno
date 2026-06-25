@@ -47,7 +47,7 @@ trait IoOp(TrivialRegisterPassable):
 
 
 @always_inline
-def fill_sqe[Op: IoOp](sqe: UnsafePointer[linux.IoUringSqe, MutAnyOrigin], op: Op):
+def fill_sqe[Op: IoOp](sqe: UnsafePointer[linux.IoUringSqe, MutUntrackedOrigin], op: Op):
     sqe[].opcode = Op.OPCODE
     sqe[].flags = Op.FLAGS
     sqe[].fd = op.sqe_fd()
@@ -71,7 +71,7 @@ struct ReadOp[T: AnyType = UInt8](IoOp, Writable):
     var file_idx: Int
     var offset: Int
     var length: Int
-    var dest: UnsafePointer[Self.T, MutAnyOrigin]
+    var dest: UnsafePointer[Self.T, MutUntrackedOrigin]
     var id: Int
 
     def sqe_fd(self) -> Int32: return Int32(self.file_idx)
@@ -89,7 +89,7 @@ struct WriteOp[T: AnyType = UInt8](IoOp, Writable):
     var file_idx: Int
     var offset: Int
     var length: Int
-    var src: UnsafePointer[Self.T, MutAnyOrigin]
+    var src: UnsafePointer[Self.T, MutUntrackedOrigin]
     var id: Int
 
     def sqe_fd(self) -> Int32: return Int32(self.file_idx)
@@ -136,13 +136,13 @@ struct RingError(SystemError):
 
 
 struct SubmissionQueue(Movable):
-    var ring: Optional[UnsafePointer[UInt8, MutAnyOrigin]]
+    var ring: Optional[UnsafePointer[UInt8, MutUntrackedOrigin]]
     var ring_size: Int
-    var head: Optional[UnsafePointer[UInt32, MutAnyOrigin]]
-    var tail: Optional[UnsafePointer[UInt32, MutAnyOrigin]]
+    var head: Optional[UnsafePointer[UInt32, MutUntrackedOrigin]]
+    var tail: Optional[UnsafePointer[UInt32, MutUntrackedOrigin]]
     var mask: UInt32
-    var array: Optional[UnsafePointer[UInt32, MutAnyOrigin]]
-    var entries: Optional[UnsafePointer[linux.IoUringSqe, MutAnyOrigin]]
+    var array: Optional[UnsafePointer[UInt32, MutUntrackedOrigin]]
+    var entries: Optional[UnsafePointer[linux.IoUringSqe, MutUntrackedOrigin]]
     var entries_size: Int
 
     def __init__(out self):
@@ -157,12 +157,12 @@ struct SubmissionQueue(Movable):
 
 
 struct CompletionQueue(Movable):
-    var ring: Optional[UnsafePointer[UInt8, MutAnyOrigin]]
+    var ring: Optional[UnsafePointer[UInt8, MutUntrackedOrigin]]
     var ring_size: Int
-    var head: Optional[UnsafePointer[UInt32, MutAnyOrigin]]
-    var tail: Optional[UnsafePointer[UInt32, MutAnyOrigin]]
+    var head: Optional[UnsafePointer[UInt32, MutUntrackedOrigin]]
+    var tail: Optional[UnsafePointer[UInt32, MutUntrackedOrigin]]
     var mask: UInt32
-    var entries: Optional[UnsafePointer[linux.IoUringCqe, MutAnyOrigin]]
+    var entries: Optional[UnsafePointer[linux.IoUringCqe, MutUntrackedOrigin]]
 
     def __init__(out self):
         self.ring = None
@@ -231,7 +231,7 @@ struct IoRing[queue_depth: Int = 2048](Movable):
             self.ring_fd = -1
             return
 
-        var sq_ring = UnsafePointer[UInt8, MutAnyOrigin](unsafe_from_address=sq_addr)
+        var sq_ring = UnsafePointer[UInt8, MutUntrackedOrigin](unsafe_from_address=sq_addr)
         self.sq.ring = sq_ring
 
         var cq_ring = sq_ring
@@ -244,7 +244,7 @@ struct IoRing[queue_depth: Int = 2048](Movable):
                 _ = sys.sys_close(self.ring_fd)
                 self.ring_fd = -1
                 return
-            cq_ring = UnsafePointer[UInt8, MutAnyOrigin](unsafe_from_address=cq_addr)
+            cq_ring = UnsafePointer[UInt8, MutUntrackedOrigin](unsafe_from_address=cq_addr)
         self.cq.ring = cq_ring
 
         self.sq.entries_size = Int(params.sq_entries) * size_of[linux.IoUringSqe]()
@@ -259,7 +259,7 @@ struct IoRing[queue_depth: Int = 2048](Movable):
             self.ring_fd = -1
             return
 
-        self.sq.entries = UnsafePointer[linux.IoUringSqe, MutAnyOrigin](unsafe_from_address=sqes_addr)
+        self.sq.entries = UnsafePointer[linux.IoUringSqe, MutUntrackedOrigin](unsafe_from_address=sqes_addr)
         self.sq.head = (sq_ring + Int(params.sq_off.head)).bitcast[UInt32]()
         self.sq.tail = (sq_ring + Int(params.sq_off.tail)).bitcast[UInt32]()
         self.sq.mask = (sq_ring + Int(params.sq_off.ring_mask)).bitcast[UInt32]()[]
@@ -337,9 +337,8 @@ struct IoRing[queue_depth: Int = 2048](Movable):
                 raise RingError(-1, fd, "open")
             self.file_fds.append(Int32(fd))
 
-        var fds_span = Span[Int32, MutAnyOrigin](
-            ptr=UnsafePointer[Int32, MutAnyOrigin](
-                unsafe_from_address=Int(self.file_fds.unsafe_ptr())),
+        var fds_span = Span[Int32, MutUntrackedOrigin](
+            ptr=self.file_fds.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin](),
             length=len(self.file_fds),
         )
         try:
@@ -413,8 +412,8 @@ struct IoRing[queue_depth: Int = 2048](Movable):
     def submit_one[Op: IoOp](mut self, op: Op) raises RingError -> Int:
         var ops = InlineArray[Op, 1](uninitialized=True)
         ops[0] = op
-        var span = Span[Op, MutAnyOrigin](
-            ptr=UnsafePointer[Op, MutAnyOrigin](unsafe_from_address=Int(UnsafePointer(to=ops[0]))),
+        var span = Span[Op, MutUntrackedOrigin](
+            ptr=UnsafePointer(to=ops[0]).unsafe_origin_cast[MutUntrackedOrigin](),
             length=1,
         )
         return self.submit_many[Op](span, 0)
@@ -605,8 +604,8 @@ struct LoadShardKernel[queue_depth: Int](BurstKernel):
     through the mailbox. Backing storage is owned by the caller of
     dispatch_reads and must live until that caller joins the pool.
     """
-    var fds: Span[Int32, MutAnyOrigin]
-    var ops: Span[ReadOp[], MutAnyOrigin]
+    var fds: Span[Int32, MutUntrackedOrigin]
+    var ops: Span[ReadOp[], MutUntrackedOrigin]
 
     def execute(mut self):
         """Worker body: construct a ring, register fds, fill-drain ops.
@@ -641,13 +640,11 @@ def make_load_kernel[queue_depth: Int](
     fds: Span[Int32, _],
     ops: Span[ReadOp[], _],
 ) -> LoadShardKernel[queue_depth]:
-    var fds_wild = UnsafePointer[Int32, MutAnyOrigin](
-        unsafe_from_address=Int(fds.unsafe_ptr()))
-    var ops_wild = UnsafePointer[ReadOp[], MutAnyOrigin](
-        unsafe_from_address=Int(ops.unsafe_ptr()))
+    var fds_wild = fds.unsafe_ptr().unsafe_mut_cast[True]().unsafe_origin_cast[MutUntrackedOrigin]()
+    var ops_wild = ops.unsafe_ptr().unsafe_mut_cast[True]().unsafe_origin_cast[MutUntrackedOrigin]()
     return LoadShardKernel[queue_depth](
-        fds=Span[Int32, MutAnyOrigin](ptr=fds_wild, length=len(fds)),
-        ops=Span[ReadOp[], MutAnyOrigin](ptr=ops_wild, length=len(ops)),
+        fds=Span[Int32, MutUntrackedOrigin](ptr=fds_wild, length=len(fds)),
+        ops=Span[ReadOp[], MutUntrackedOrigin](ptr=ops_wild, length=len(ops)),
     )
 
 

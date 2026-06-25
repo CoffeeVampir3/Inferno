@@ -25,7 +25,7 @@ struct FlashPrefillSlidingKernel[
     count `num_q` and `kv_stride` are runtime; per-head storage sizes to the
     comptime `max_q` cap (= model NUM_HEADS)."""
 
-    var runs: UnsafePointer[KVRunTable, MutAnyOrigin]
+    var runs: UnsafePointer[KVRunTable, MutUntrackedOrigin]
     var q: BF16Ptr
     var k_base: BF16Ptr
     var v_base: BF16Ptr
@@ -85,7 +85,9 @@ struct FlashPrefillSlidingKernel[
                 var tile_len = min(TILE, hi - pos)
                 process_kv_tile[
                     Self.head_dim, Self.gqa_ratio,
-                ](kv, q_ptrs, self.k_base, self.v_base,
+                ](kv, q_ptrs,
+                  self.k_base,
+                  self.v_base,
                   0, pos, tile_len, m, l, acc_ptrs,
                   self.num_q, self.kv_stride)
                 pos += TILE
@@ -121,7 +123,7 @@ struct FlashPrefillFullKernel[
     context-shard `degree`, `kv_stride`, and page geometry are runtime. Writes
     (acc, m, l) partials for the cross-rank logsum merge."""
 
-    var runs: UnsafePointer[KVRunTable, MutAnyOrigin]
+    var runs: UnsafePointer[KVRunTable, MutUntrackedOrigin]
     var q: BF16Ptr
     var k_base: BF16Ptr
     var v_base: BF16Ptr
@@ -180,7 +182,9 @@ struct FlashPrefillFullKernel[
                 var tile_len = min(TILE, local_kv_count - pos)
                 process_kv_tile[
                     Self.head_dim, Self.gqa_ratio,
-                ](kv, q_ptrs, self.k_base, self.v_base,
+                ](kv, q_ptrs,
+                  self.k_base,
+                  self.v_base,
                   0, pos, tile_len, m, l, acc_ptrs, Self.num_q, self.kv_stride)
                 pos += TILE
 
@@ -206,7 +210,7 @@ struct PrefillMergeKernel[
 ](WorkerRangePartitionedKernel):
     var config: PrefillMergeConfig[Self.head_dim, Self.o]
     var q_rank: Int
-    var segment_scratch: UnsafePointer[MergeSegment, MutAnyOrigin]
+    var segment_scratch: UnsafePointer[MergeSegment, MutUntrackedOrigin]
     var num_q: Int
     var local_num_q: Int
     var partial_stride: Int
@@ -268,7 +272,10 @@ def dispatch_merge_flash_prefill_partials[
 
     @parameter
     def make(q_rank: Int) -> K:
-        return K(cfg, q_rank, segment_scratch[q_rank], nq, lnq, ps, 0, 0, 0)
+        return K(
+            cfg, q_rank,
+            segment_scratch[q_rank],
+            nq, lnq, ps, 0, 0, 0)
 
     var total_units = seq_len * local_num_q
     var data_bytes = total_units * len(pools) * (head_dim + 2) * 4

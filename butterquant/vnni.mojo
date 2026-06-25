@@ -6,8 +6,8 @@ from std.sys.info import simd_width_of
 from simd_math.matrixops import transpose_generic
 
 
-comptime PtrU8 = UnsafePointer[UInt8, MutAnyOrigin]
-comptime PtrF32 = UnsafePointer[Float32, MutAnyOrigin]
+comptime PtrU8 = UnsafePointer[UInt8, MutUntrackedOrigin]
+comptime PtrF32 = UnsafePointer[Float32, MutUntrackedOrigin]
 
 comptime L2_TARGET = 256 * 1024
 comptime VNNI_N_STEP = 32

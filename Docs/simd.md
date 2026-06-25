@@ -493,4 +493,4 @@ Called on a **boolean** SIMD mask. Returns a new vector where element `i` is `tr
 
 ## Implemented traits
 
-`Absable`, `AnyType`, `Boolable`, `CeilDivable`, `Ceilable`, `Comparable`, `ConvertibleToPython`, `Copyable`, `Defaultable`, `DevicePassable`, `DivModable`, `Equatable`, `Floorable`, `Hashable`, `ImplicitlyCopyable`, `ImplicitlyDestructible`, `Indexer`, `Intable`, `Movable`, `Powable`, `RegisterPassable`, `Roundable`, `Sized`, `TrivialRegisterPassable`, `Truncable`, `Writable`, `_FromInt`.
+`Absable`, `AnyType`, `Boolable`, `CeilDivable`, `Ceilable`, `Comparable`, `ConvertibleToPython`, `Copyable`, `Defaultable`, `DevicePassable`, `DivModable`, `Equatable`, `Floorable`, `Hashable`, `ImplicitlyCopyable`, `ImplicitlyDeletable`, `Indexer`, `Intable`, `Movable`, `Powable`, `RegisterPassable`, `Roundable`, `Sized`, `TrivialRegisterPassable`, `Truncable`, `Writable`, `_FromInt`.

@@ -11,7 +11,7 @@ from butterquant.amx_tiles import (
 )
 
 
-comptime I32Ptr = UnsafePointer[Int32, MutAnyOrigin]
+comptime I32Ptr = UnsafePointer[Int32, MutUntrackedOrigin]
 comptime WIDTH = simd_width_of[DType.int32]()
 comptime INV127 = Float32(1.0) / Float32(127.0)
 comptime CTILE = AMX_TILE_M * AMX_TILE_N
@@ -243,7 +243,7 @@ def amx_gemm[
 
 def amx_gemm_linear_store[block: Int, Out: DType](
     act: I8Ptr, m: Int, n_rows: Int, k_dim: Int, act_scale: F32Ptr,
-    weight: I8Ptr, wsc: F32Ptr, output: UnsafePointer[Scalar[Out], MutAnyOrigin],
+    weight: I8Ptr, wsc: F32Ptr, output: UnsafePointer[Scalar[Out], MutUntrackedOrigin],
     start_tile: Int, end_tile: Int,
 ):
     @parameter

@@ -108,7 +108,7 @@ struct EvalCaptures(Movable):
 
     @always_inline
     def row_ptr(mut self, i: Int) -> BF16Ptr:
-        return self.rows.unsafe_ptr() + i * C.HIDDEN
+        return self.rows.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin]() + i * C.HIDDEN
 
 
 def extract_train[
@@ -288,7 +288,7 @@ def semantic_norm(mut data: ContrastSet[C.HIDDEN]) -> Float64:
     if n <= 0:
         return Float64(0)
     var energy = List[Float32](length=C.HIDDEN, fill=Float32(0))
-    var e_ptr: F32Ptr = energy.unsafe_ptr()
+    var e_ptr: F32Ptr = energy.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin]()
     accumulate_energy(data.high_ptr(0), data.n_high, e_ptr)
     accumulate_energy(data.low_ptr(0), data.n_low, e_ptr)
     var sink = find_sinks(e_ptr, Float64(SINK_ENERGY_FACTOR))
@@ -514,15 +514,15 @@ def select_layer[
 
     var mean_high = List[Float32](length=C.HIDDEN, fill=Float32(0))
     var mean_low = List[Float32](length=C.HIDDEN, fill=Float32(0))
-    var mh_ptr: F32Ptr = mean_high.unsafe_ptr()
-    var ml_ptr: F32Ptr = mean_low.unsafe_ptr()
+    var mh_ptr: F32Ptr = mean_high.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin]()
+    var ml_ptr: F32Ptr = mean_low.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin]()
     var directions = List[BFloat16](
         length=NUM_TAP_LAYERS * C.HIDDEN, fill=BFloat16(0))
     var results = List[ProbeResult]()
     var n_sem = List[Float64](length=NUM_TAP_LAYERS, fill=Float64(0))
     var drift = List[Float64](length=NUM_TAP_LAYERS, fill=Float64(0))
     for k in range(NUM_TAP_LAYERS):
-        var dir_ptr: BF16Ptr = directions.unsafe_ptr() + k * C.HIDDEN
+        var dir_ptr: BF16Ptr = directions.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin]() + k * C.HIDDEN
         var r = build_probe[C.HIDDEN](
             dataset[k], model.steer.tap_layers[k], mh_ptr, ml_ptr, dir_ptr)
         results.append(r)
@@ -619,9 +619,11 @@ def finalize_trait[
     var mean_low = List[Float32](length=C.HIDDEN, fill=Float32(0))
     var composite = List[BFloat16](length=C.HIDDEN, fill=BFloat16(0))
     _ = build_probe[C.HIDDEN](
-        rec.data, rec.layer, mean_high.unsafe_ptr(), mean_low.unsafe_ptr(),
-        composite.unsafe_ptr())
-    var composite_ptr: BF16Ptr = composite.unsafe_ptr()
+        rec.data, rec.layer,
+        mean_high.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin](),
+        mean_low.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin](),
+        composite.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin]())
+    var composite_ptr: BF16Ptr = composite.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin]()
 
     model.set_steer_vector(slot, composite)
     model.steer.clear_inject()
@@ -655,7 +657,7 @@ def finalize_trait[
         (hi_stats[0] - lo_stats[0]) / holdout_std
         if holdout_std > Float64(0) else Float64(0))
 
-    var measure_ptr: BF16Ptr = rec.measure_dir.unsafe_ptr()
+    var measure_ptr: BF16Ptr = rec.measure_dir.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin]()
     var base_low = EvalCaptures(len(lo_eval_in))
     if not extract_eval(
             model, sched, tok, lo_eval_in, lo_eval_out, greedy,

@@ -59,7 +59,7 @@ struct RopeCacheWriteKernel[
     """The KV cache slot stride equals the per-token KV write size
     (`num_kv * head_dim`) in every Gemma4 cache layout, so it is derived rather
     than threaded separately."""
-    var runs: UnsafePointer[KVRunTable, MutAnyOrigin]
+    var runs: UnsafePointer[KVRunTable, MutUntrackedOrigin]
     var q: BF16Ptr
     var k_src: BF16Ptr
     var v_src: BF16Ptr
@@ -137,7 +137,7 @@ def dispatch_rope_cache_write[
     v_cache: Binding[BFloat16, o],
     cos_table: Binding[Float32, o],
     sin_table: Binding[Float32, o],
-    runs: UnsafePointer[KVRunTable, MutAnyOrigin],
+    runs: UnsafePointer[KVRunTable, MutUntrackedOrigin],
     num_q: Int, num_kv: Int, cache_degree: Int,
     page_shift: Int, row_mask: Int, page_mask: Int,
     seq_len: Int,
@@ -155,10 +155,16 @@ def dispatch_rope_cache_write[
 
     @parameter
     def make(r: Int) -> K:
-        return K(runs, q[r], k_src[r], v_src[r],
-                 k_cache[r], v_cache[r],
-                 cos_table[r], sin_table[r],
-                 nq, nkv, cd, r % cd, ps, rm, pm, 0, 0)
+        return K(
+            runs,
+            q[r],
+            k_src[r],
+            v_src[r],
+            k_cache[r],
+            v_cache[r],
+            cos_table[r],
+            sin_table[r],
+            nq, nkv, cd, r % cd, ps, rm, pm, 0, 0)
 
     fanout_dispatch[make, max_worker_count=max_worker_count, label="rope_cache_write"](
         pools, prof, seq_len, seq_len * row_bytes,
@@ -174,7 +180,7 @@ struct RopeKCacheWriteKernel[
     path (e.g. the MiniMax lightning indexer): ropes `num_q` query heads in
     place and ropes + writes `num_kv` key heads to the round-robin context cache.
     Identical to RopeCacheWriteKernel minus the V copy."""
-    var runs: UnsafePointer[KVRunTable, MutAnyOrigin]
+    var runs: UnsafePointer[KVRunTable, MutUntrackedOrigin]
     var q: BF16Ptr
     var k_src: BF16Ptr
     var k_cache: BF16Ptr
@@ -244,7 +250,7 @@ def dispatch_rope_k_cache_write[
     k_cache: Binding[BFloat16, o],
     cos_table: Binding[Float32, o],
     sin_table: Binding[Float32, o],
-    runs: UnsafePointer[KVRunTable, MutAnyOrigin],
+    runs: UnsafePointer[KVRunTable, MutUntrackedOrigin],
     num_q: Int, num_kv: Int, cache_degree: Int,
     page_shift: Int, row_mask: Int, page_mask: Int,
     seq_len: Int,
@@ -262,9 +268,14 @@ def dispatch_rope_k_cache_write[
 
     @parameter
     def make(r: Int) -> K:
-        return K(runs, q[r], k_src[r], k_cache[r],
-                 cos_table[r], sin_table[r],
-                 nq, nkv, cd, r % cd, ps, rm, pm, 0, 0)
+        return K(
+            runs,
+            q[r],
+            k_src[r],
+            k_cache[r],
+            cos_table[r],
+            sin_table[r],
+            nq, nkv, cd, r % cd, ps, rm, pm, 0, 0)
 
     fanout_dispatch[make, max_worker_count=max_worker_count, label="rope_k_cache_write"](
         pools, prof, seq_len, seq_len * row_bytes,

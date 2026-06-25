@@ -20,7 +20,7 @@ def store_bf16[width: Int](
 @always_inline
 def store_out[Out: DType, width: Int](
     v: SIMD[DType.float32, width],
-    dst: UnsafePointer[Scalar[Out], MutAnyOrigin],
+    dst: UnsafePointer[Scalar[Out], MutUntrackedOrigin],
 ):
     comptime if Out == DType.bfloat16:
         store_bf16[width](v, dst.bitcast[Scalar[DType.bfloat16]]())

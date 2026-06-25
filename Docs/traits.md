@@ -274,8 +274,8 @@ Parameterized structs
 
 You can also add parameters to structs. You can use parameterized structs to build generic collections. For example, a generic array type might include code like this:
 
-struct GenericArray[ElementType: Copyable & ImplicitlyDestructible]:
-    var data: UnsafePointer[Self.ElementType, MutExternalOrigin]
+struct GenericArray[ElementType: Copyable & ImplicitlyDeletable]:
+    var data: UnsafePointer[Self.ElementType, MutUntrackedOrigin]
     var size: Int
 
     def __init__(out self, var *elements: Self.ElementType):
@@ -312,7 +312,7 @@ for i in range(array.size):
 
 A parameterized struct can use the Self type to represent a concrete instance of the struct (that is, with all its parameters specified). For example, you could add a static factory method to GenericArray with the following signature:
 
-struct GenericArray[ElementType: Copyable & ImplicitlyDestructible]:
+struct GenericArray[ElementType: Copyable & ImplicitlyDeletable]:
     ...
 
     @staticmethod
@@ -406,8 +406,8 @@ struct _ListIter[
 
     # ... implementation omitted
 
-struct List[T: Copyable](
-    Boolable, Copyable, Defaultable, Iterable, Sized
+struct List[T: Movable & ImplicitlyDeletable](
+    Boolable, Defaultable, Iterable, Sized
 ):
     comptime IteratorType[
         iterable_mut: Bool, //, iterable_origin: Origin[iterable_mut]
@@ -705,7 +705,7 @@ If the compiler can't infer the value of an infer-only parameter, and it's not s
 
 #### Origin-polymorphic trait methods
 
-Trait methods that accept `UnsafePointer` (or other origin-parameterized types) often need to work with any caller-provided origin rather than requiring `MutAnyOrigin`. This avoids forcing callers to launder their pointer origins through `Int` and back.
+Trait methods that accept `UnsafePointer` (or other origin-parameterized types) often need to work with any caller-provided origin rather than requiring `MutUnsafeAnyOrigin`. This avoids forcing callers to launder their pointer origins through `Int` and back.
 
 The pattern is to add an `origin: MutOrigin` parameter that the compiler infers from the argument:
 
@@ -729,7 +729,7 @@ Callers pass stack-local pointers directly without origin laundering:
 def use_pool[P: Pool](mut pool: P):
     var jobs = InlineArray[MyArgs, 128](uninitialized=True)
     jobs[0] = MyArgs(10, 20)
-    # origin inferred from jobs — no MutAnyOrigin cast needed
+    # origin inferred from jobs — no MutUnsafeAnyOrigin cast needed
     pool.dispatch[MyArgs, my_kernel](UnsafePointer(to=jobs[0]), 1)
 ```
 
@@ -738,7 +738,7 @@ Without origin polymorphism, the caller would need to erase and reconstruct the 
 ```mojo
 # Bad: origin laundering through Int
 pool.dispatch[MyArgs, my_kernel](
-    UnsafePointer[MyArgs, MutAnyOrigin](unsafe_from_address=Int(UnsafePointer(to=jobs[0]))), 1)
+    UnsafePointer[MyArgs, MutUnsafeAnyOrigin](unsafe_from_address=Int(UnsafePointer(to=jobs[0]))), 1)
 ```
 
 Use `MutOrigin` when the data is always mutable (the common case for dispatch buffers). For read-only access, use the `is_mutable: Bool, //, origin: Origin[mut=is_mutable]` pattern to accept both mutable and immutable origins.
@@ -829,7 +829,7 @@ Because a comptime value can be a type, you can use parameterized comptime value
 comptime TwoOfAKind[dt: DType] = SIMD[dt, 2]
 twoFloats = TwoOfAKind[DType.float32](1.0, 2.0)
 
-comptime StringKeyDict[ValueType: Copyable & ImplicitlyDestructible] = Dict[String, ValueType]
+comptime StringKeyDict[ValueType: Copyable & ImplicitlyDeletable] = Dict[String, ValueType]
 var b: StringKeyDict[UInt8] = {"answer": 42}
 
 Parameterized comptime declarations support the same features as parameterized structs or functions: infer-only parameters, keyword-only and optional parameters, automatic parameterization, and so on.
@@ -1375,7 +1375,7 @@ The Mojo standard library includes many traits. They're implemented by a number 
     Equatable
     Hashable
     ImplicitlyCopyable
-    ImplicitlyDestructible
+    ImplicitlyDeletable
     Indexer
     Intable
     IntableRaising
@@ -1484,16 +1484,16 @@ Mojo provides two core traits for managing value lifetimes:
 
     AnyType: The base trait that all types extend. Types conforming only to AnyType may require explicit destruction.
 
-    ImplicitlyDestructible: Types that can be automatically destroyed by calling __del__() when their lifetime ends.
+    ImplicitlyDeletable: Types that can be automatically destroyed by calling __del__() when their lifetime ends.
 
 For detailed information about value destruction, explicit destruction with the @explicit_destroy decorator, and when to use each approach, see Death of a value.
 Generic structs with traits
 
 You can also use traits when defining a generic container. A generic container is a container (for example, an array or hashmap) that can hold different data types. In a dynamic language like Python it's easy to add different types of items to a container. But in a statically-typed environment, the compiler needs to be able to identify the types at compile time. For example, if the container needs to copy a value, the compiler needs to verify that the type can be copied.
 
-The List type is an example of a generic container. A single List can only hold a single type of data. The list elements must conform to the Copyable trait:
+The List type is an example of a generic container. A single List can only hold a single type of data. The minimum bound on the element type is `Movable & ImplicitlyDeletable`, so a List can hold move-only elements; only copy-requiring methods (like `__copyinit__`) stay gated on `Copyable`:
 
-struct List[T: Copyable]:
+struct List[T: Movable & ImplicitlyDeletable]:
 
 For example, you can create a list of integer values like this:
 
@@ -1504,7 +1504,7 @@ for i in range(len(list)):
 
 1 2 3 4
 
-You can use traits to define requirements for elements that are stored in a container. For example, List requires elements that can be moved and copied. To store a struct in a List, the struct needs to conform to the Copyable trait, which requires a copy constructor and a move constructor.
+You can use traits to define requirements for elements that are stored in a container. For example, List requires elements that are movable and implicitly deletable. To store a struct in a List, the struct needs a move constructor and a destructor; it only needs a copy constructor (the Copyable trait) if you call a copy-requiring method such as copying the List itself.
 
 Building generic containers is an advanced topic. For an introduction, see the section on parameterized structs.
 comptime members for generics
@@ -1543,7 +1543,7 @@ trait Stacklike:
 
 The following struct implements the Stacklike trait using a List as the underlying storage:
 
-struct MyStack[type: Copyable & ImplicitlyDestructible](Stacklike):
+struct MyStack[type: Copyable & ImplicitlyDeletable](Stacklike):
     """A simple Stack built using a List."""
     comptime EltType = Self.type
     comptime list_type = List[Self.EltType]
@@ -1600,7 +1600,7 @@ You must always restrict generic parameters with trait bounds. Traits define the
 
     With generics, the most permissive trait bound is AnyType. It places no behavioral requirements on a type and serves as the least restrictive bound available.
 
-    ImplicitlyDestructible is another baseline trait. It is the base trait for types that require lifetime management using destructors. Any type that needs cleanup when it goes out of scope should implement this trait. Generic code that stores or owns values often relies on it.
+    ImplicitlyDeletable is another baseline trait. It is the base trait for types that require lifetime management using destructors. Any type that needs cleanup when it goes out of scope should implement this trait. Generic code that stores or owns values often relies on it.
 
 Bounds are what make generic code workable. Without them, the compiler can't allow useful operations, and functions and methods can't do anything meaningful.
 
@@ -1794,7 +1794,7 @@ The safe zone includes:
 
 Think comparisons, predicates, and pure operations.
 
-As a working rule of thumb, if your generic code needs to own, copy, or decide when a value dies, avoid explicitly destroyed types. Add ImplicitlyDestructible bounds to bypass any issues.
+As a working rule of thumb, if your generic code needs to own, copy, or decide when a value dies, avoid explicitly destroyed types. Add ImplicitlyDeletable bounds to bypass any issues.
 Conditional trait conformance
 
 Conditional trait conformance uses checks before allowing a type to adopt a trait. If the condition is satisfied, the type conforms. It must fulfill the trait's requirements by providing required methods and associated types, and it gains any default implementation provided by the trait. The type can then be used anywhere the trait is required, such as when passing it to a function that expects a conforming type.
@@ -1804,7 +1804,7 @@ Example: derived conformance
 
 In the following declaration, Mojo conforms Wrapper to Writable when its parameter, T, is also Writable:
 
-comptime BaseTraits = Copyable & ImplicitlyDestructible
+comptime BaseTraits = Copyable & ImplicitlyDeletable
 @fieldwise_init
 struct Wrapper[T: BaseTraits](
     Writable where conforms_to(T, Writable)
@@ -1842,7 +1842,7 @@ Example: parts conformance
 
 Conditional conformance has another standard pattern for types with multiple distinct components: Result[T, E], Pair[L, R], Dict[K, V], and similar. It says: "This type can do X if each of its parts can do X":
 
-comptime BaseTraits = Copyable & ImplicitlyDestructible
+comptime BaseTraits = Copyable & ImplicitlyDeletable
 
 @fieldwise_init
 struct Pair[L: BaseTraits, R: BaseTraits](
@@ -1903,7 +1903,7 @@ if w_empty_str:  # Chooses the empty branch
 else:
     print(t"Empty string \"{w_empty_str.value}\" is falsy")
 
-The NotWritable type from earlier in this section has no traits beyond the base Copyable and ImplicitlyDestructible. Therefore it isn't Boolable and the condition on the __bool__() method will fail:
+The NotWritable type from earlier in this section has no traits beyond the base Copyable and ImplicitlyDeletable. Therefore it isn't Boolable and the condition on the __bool__() method will fail:
 
 @fieldwise_init
 struct NotWritable(BaseTraits):
@@ -2013,7 +2013,7 @@ Mojo supports flexible condition composition, as shown in these examples:
 
     Unconditional: No special clauses.
 
-    struct Foo(Copyable, ImplicitlyDestructible):
+    struct Foo(Copyable, ImplicitlyDeletable):
 
     Simple condition: as shown in Wrapper.
 
@@ -2558,7 +2558,7 @@ The reflection entry point is `reflect[T]`, a comptime alias for the handle type
 Methods on the handle return either a runtime value (call with parens) or a type (no parens):
 
     Value-returning: `field_count()`, `field_names()`, `field_types()`, `name()`, `base_name()`, `is_struct()`, `field_index[name]()`, `field_offset[name=lit]()`, `field_offset[index=N]()`, `field_ref[i](instance)`.
-    Type-returning (parametric comptime member alias): `field_type[name]` — yields `Reflected[FieldT]`, fully composable (e.g. `reflect[T].field_type["x"].name()`).
+    Type-returning (parametric comptime member alias): `field[name]` — yields a chainable `Reflected[FieldT]` handle (retrieve the bare field type via its `.T` member), fully composable (e.g. `reflect[T].field["x"].name()` or `reflect[T].field["x"].T`).
 
 A function-side reflection handle is also available via `reflect_fn[func]`, exposing `display_name()` and `linkage_name()`.
 Example: Present a type
@@ -2643,7 +2643,7 @@ trait MakeCopyable:
             comptime FT = reflect[Self].field_types()[idx]
 
             # Guard: field type must be copyable and destructible
-            comptime if conforms_to(FT, Copyable & ImplicitlyDestructible):
+            comptime if conforms_to(FT, Copyable & ImplicitlyDeletable):
                 ref src = reflect[Self].field_ref[idx](self)
                 ref dst = reflect[Self].field_ref[idx](other)
                 dst = src.copy()
@@ -2653,7 +2653,7 @@ Insights
     The function iterates over reflected fields and checks each one for Copyable conformance, skipping any field that cannot be copied.
     As a method, copy_to() does not require a type parameter such as copy_to[T](). It has direct access to Self, which is enabled by MakeCopyable trait adoption.
     The implementation is heavily parameterized and evaluated at compile time. It uses comptime for and comptime if together with reflection calls.
-    `reflect[Self].field_ref[idx](self)` returns a reference to a field by index, on both the source and destination instances. Inside the `comptime if conforms_to(FT, Copyable & ImplicitlyDestructible)` branch the compiler knows each field reference satisfies those traits, so the `.copy()` call and the assignment resolve directly.
+    `reflect[Self].field_ref[idx](self)` returns a reference to a field by index, on both the source and destination instances. Inside the `comptime if conforms_to(FT, Copyable & ImplicitlyDeletable)` branch the compiler knows each field reference satisfies those traits, so the `.copy()` call and the assignment resolve directly.
 
 Create a struct
 
@@ -2831,7 +2831,7 @@ def text_to_bytes(text: String) -> List[Byte]:
 # In capabilities.mojo
 from .transform_utils import bytes_to_text, text_to_bytes
 
-trait ByteTransform(Movable, ImplicitlyDestructible):
+trait ByteTransform(Movable, ImplicitlyDeletable):
     def encode(self, data: Span[Byte]) -> String:
         return bytes_to_text(data)
 
@@ -2898,9 +2898,9 @@ Trait defaults are not useful when:
 
 Linear types with @explicit_destroy
 
-By default, structs conform to `ImplicitlyDestructible`, meaning the compiler automatically destroys them when their lifetime ends. Traits do not inherit `ImplicitlyDestructible` by default.
+By default, structs conform to `ImplicitlyDeletable`, meaning the compiler automatically destroys them when their lifetime ends. Traits do not inherit `ImplicitlyDeletable` by default.
 
-Applying `@explicit_destroy` to a struct opts it out of `ImplicitlyDestructible`. The compiler no longer inserts automatic destruction for values of that type. Instead, the only way to consume an `@explicit_destroy` value is through a `deinit self` method. If a value of an explicitly destroyed type is not consumed, the compiler emits an error.
+Applying `@explicit_destroy` to a struct opts it out of `ImplicitlyDeletable`. The compiler no longer inserts automatic destruction for values of that type. Instead, the only way to consume an `@explicit_destroy` value is through a `deinit self` method. If a value of an explicitly destroyed type is not consumed, the compiler emits an error.
 
 This makes `@explicit_destroy` types linear types: every value must be used exactly once. This is useful for modeling resources that require explicit cleanup, synchronization tokens, or ownership transfer protocols where silent destruction would be a bug.
 
@@ -2939,7 +2939,7 @@ def submit_work(pool: Pool) raises:
 
 Key points:
 
-- `@explicit_destroy` on a struct removes its implicit `ImplicitlyDestructible` conformance.
+- `@explicit_destroy` on a struct removes its implicit `ImplicitlyDeletable` conformance.
 - The struct must provide at least one `deinit self` method to consume values.
 - Unconsumed values produce a compile-time error.
 - This pattern is well-suited for synchronization tokens, file handles that must be flushed, transaction objects that must be committed or rolled back, and any resource where silent drop would be incorrect.

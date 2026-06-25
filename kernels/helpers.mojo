@@ -12,9 +12,9 @@ from .dispatch_heuristics import (
 from .profiling import Profiler, DispatchSpan
 
 
-comptime BF16Ptr = UnsafePointer[BFloat16, MutAnyOrigin]
-comptime F32Ptr  = UnsafePointer[Float32,  MutAnyOrigin]
-comptime I32Ptr  = UnsafePointer[Int32,    MutAnyOrigin]
+comptime BF16Ptr = UnsafePointer[BFloat16, MutUntrackedOrigin]
+comptime F32Ptr  = UnsafePointer[Float32,  MutUntrackedOrigin]
+comptime I32Ptr  = UnsafePointer[Int32,    MutUntrackedOrigin]
 comptime W  = simd_width_of[DType.float32]()
 comptime BW = simd_width_of[DType.bfloat16]()
 
@@ -46,12 +46,13 @@ trait WorkerRangePartitionedKernel(OutputPartitionedKernel):
 
 @always_inline
 def accumulate_scaled[
-    src_dtype: DType, accum: DType, //,
+    src_dtype: DType, accum: DType,
+    src_origin: MutOrigin, acc_origin: MutOrigin, //,
     cols: Int,
 ](
-    src: UnsafePointer[Scalar[src_dtype], MutAnyOrigin],
+    src: UnsafePointer[Scalar[src_dtype], src_origin],
     weight: Scalar[accum],
-    acc: UnsafePointer[Scalar[accum], MutAnyOrigin],
+    acc: UnsafePointer[Scalar[accum], acc_origin],
 ):
     """`acc[i] += weight * src[i]` over `cols` with PU-unrolled SIMD."""
     comptime width = simd_width_of[accum]()
@@ -68,10 +69,10 @@ def accumulate_scaled[
 
 @always_inline
 def scale_unrolled[
-    accum: DType, //,
+    accum: DType, acc_origin: MutOrigin, //,
     cols: Int,
 ](
-    acc: UnsafePointer[Scalar[accum], MutAnyOrigin],
+    acc: UnsafePointer[Scalar[accum], acc_origin],
     factor: Scalar[accum],
 ):
     comptime width = simd_width_of[accum]()
@@ -236,14 +237,14 @@ struct RankView[o: ImmutOrigin](TrivialRegisterPassable):
 
     @always_inline
     def bind[T: AnyType](
-        self, ptr: UnsafePointer[T, MutAnyOrigin],
+        self, ptr: UnsafePointer[T, MutUntrackedOrigin],
     ) -> Binding[T, Self.o]:
         return Binding[T, Self.o](ptr, self)
 
 
 @fieldwise_init
 struct Binding[T: AnyType, o: ImmutOrigin](TrivialRegisterPassable):
-    var ptr: UnsafePointer[Self.T, MutAnyOrigin]
+    var ptr: UnsafePointer[Self.T, MutUntrackedOrigin]
     var view: RankView[Self.o]
 
     @always_inline
@@ -251,8 +252,8 @@ struct Binding[T: AnyType, o: ImmutOrigin](TrivialRegisterPassable):
         return self.view.degree()
 
     @always_inline
-    def __getitem__(self, rank: Int) -> UnsafePointer[Self.T, MutAnyOrigin]:
-        return UnsafePointer[Self.T, MutAnyOrigin](
+    def __getitem__(self, rank: Int) -> UnsafePointer[Self.T, MutUntrackedOrigin]:
+        return UnsafePointer[Self.T, MutUntrackedOrigin](
             unsafe_from_address=Int(self.ptr) + self.view.delta(rank))
 
     @always_inline

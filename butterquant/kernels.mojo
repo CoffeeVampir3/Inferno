@@ -8,10 +8,10 @@ from butterquant.fwht import fwht_block, fwht_row
 from butterquant.types import WF
 
 
-comptime PtrF32 = UnsafePointer[Float32, MutAnyOrigin]
-comptime PtrBF16 = UnsafePointer[Scalar[DType.bfloat16], MutAnyOrigin]
-comptime PtrI8 = UnsafePointer[Scalar[DType.int8], MutAnyOrigin]
-comptime SrcPtr[dtype: DType] = UnsafePointer[Scalar[dtype], MutAnyOrigin]
+comptime PtrF32 = UnsafePointer[Float32, MutUntrackedOrigin]
+comptime PtrBF16 = UnsafePointer[Scalar[DType.bfloat16], MutUntrackedOrigin]
+comptime PtrI8 = UnsafePointer[Scalar[DType.int8], MutUntrackedOrigin]
+comptime SrcPtr[dtype: DType] = UnsafePointer[Scalar[dtype], MutUntrackedOrigin]
 comptime WIDTH = WF
 
 @always_inline
@@ -89,7 +89,7 @@ def fwht_rotate_columns[head_dim: Int](work: PtrF32, rows: Int, cols: Int):
     if rows % head_dim != 0:
         abort(t"butterquant: rows={rows} not divisible by M-axis FWHT block={head_dim}")
     var scratch_buf = List[Float32](length=head_dim, fill=Float32(0))
-    var scratch = scratch_buf.unsafe_ptr().as_unsafe_any_origin()
+    var scratch = scratch_buf.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin]()
     var num_heads = rows // head_dim
     for h in range(num_heads):
         var base = h * head_dim

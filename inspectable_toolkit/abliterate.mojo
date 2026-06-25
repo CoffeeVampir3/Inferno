@@ -147,8 +147,7 @@ struct ShadowWeights[R: Gemma4Recipes](Movable):
 def rank_view(read bases: List[Int]) -> RankView[ImmutAnyOrigin]:
     return RankView[ImmutAnyOrigin](
         Span[Int, ImmutAnyOrigin](
-            ptr=UnsafePointer[Int, ImmutAnyOrigin](
-                unsafe_from_address=Int(bases.unsafe_ptr())),
+            ptr=bases.unsafe_ptr().unsafe_origin_cast[ImmutAnyOrigin](),
             length=len(bases)))
 
 

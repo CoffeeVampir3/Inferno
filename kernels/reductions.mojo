@@ -12,8 +12,8 @@ from .profiling import Profiler, DispatchSpan
 
 
 comptime DEFAULT_INLINE_BYTES = 16384
-comptime SrcPtr[dtype: DType] = UnsafePointer[Scalar[dtype], ImmutAnyOrigin]
-comptime DstPtr[dtype: DType] = UnsafePointer[Scalar[dtype], MutAnyOrigin]
+comptime SrcPtr[dtype: DType] = UnsafePointer[Scalar[dtype], ImmutUntrackedOrigin]
+comptime DstPtr[dtype: DType] = UnsafePointer[Scalar[dtype], MutUntrackedOrigin]
 
 
 @fieldwise_init
@@ -119,8 +119,8 @@ def dispatch_allreduce[
     E: Encoding, Accum: DType = DType.float32,
     max_worker_count: Int = 128,
 ](
-    src: RankBuffers[E.DTYPE, ImmutAnyOrigin],
-    output: RankBuffers[E.DTYPE, MutAnyOrigin],
+    src: RankBuffers[E.DTYPE, ImmutUntrackedOrigin],
+    output: RankBuffers[E.DTYPE, MutUntrackedOrigin],
     mut pools: List[P],
     mut prof: Profiler[Profile, N],
     inline_max_bytes: Int = DEFAULT_INLINE_BYTES,
@@ -195,8 +195,8 @@ def dispatch_allreduce_inplace[
     inline_max_bytes: Int = DEFAULT_INLINE_BYTES,
 ):
     var tp = len(pools)
-    var src = RankBuffers[E.DTYPE, ImmutAnyOrigin](count=count)
-    var dst = RankBuffers[E.DTYPE, MutAnyOrigin](count=count)
+    var src = RankBuffers[E.DTYPE, ImmutUntrackedOrigin](count=count)
+    var dst = RankBuffers[E.DTYPE, MutUntrackedOrigin](count=count)
     for r in range(tp):
         src.add(buf[r].as_immutable())
         dst.add(buf[r])

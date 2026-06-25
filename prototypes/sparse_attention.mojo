@@ -42,7 +42,7 @@ struct BlockSparseFlashKernel[
     head_dim: Int, num_q: Int, gqa_ratio: Int, num_kv_heads: Int,
     block_size: Int, topk_blocks: Int, partial_stride: Int,
 ](RangePartitionedKernel):
-    var runs: UnsafePointer[KVRunTable, MutAnyOrigin]
+    var runs: UnsafePointer[KVRunTable, MutUntrackedOrigin]
     var q: BF16Ptr
     var k_base: BF16Ptr
     var v_base: BF16Ptr
@@ -147,7 +147,7 @@ def dispatch_block_sparse_flash[
     v_base: Binding[BFloat16, o],
     block_idx: Binding[Int32, o],
     partials: Binding[Float32, o],
-    runs: UnsafePointer[KVRunTable, MutAnyOrigin],
+    runs: UnsafePointer[KVRunTable, MutUntrackedOrigin],
     kv_stride: Int,
     seq_len: Int,
     mut pools: List[P],
@@ -194,7 +194,7 @@ def dispatch_block_sparse_attention[
     output: Binding[BFloat16, o],
     partials: Binding[Float32, o],
     segment_scratch: Binding[MergeSegment, o],
-    runs: UnsafePointer[KVRunTable, MutAnyOrigin],
+    runs: UnsafePointer[KVRunTable, MutUntrackedOrigin],
     kv_stride: Int,
     seq_len: Int,
     mut pools: List[P],
@@ -239,7 +239,7 @@ def dispatch_minimax_m3_sparse_attention[
     output: Binding[BFloat16, o],
     partials: Binding[Float32, o],
     segment_scratch: Binding[MergeSegment, o],
-    runs: UnsafePointer[KVRunTable, MutAnyOrigin],
+    runs: UnsafePointer[KVRunTable, MutUntrackedOrigin],
     seq_len: Int,
     mut pools: List[P],
     mut prof: Profiler[Profile, N],

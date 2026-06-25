@@ -92,7 +92,7 @@ struct BindContext[o: ImmutOrigin](Copyable, ImplicitlyCopyable):
 
     @always_inline
     def bind[T: AnyType](
-        self, ptr: UnsafePointer[T, MutAnyOrigin],
+        self, ptr: UnsafePointer[T, MutUntrackedOrigin],
     ) -> Binding[T, Self.o]:
         return self.view.bind(ptr)
 
@@ -128,8 +128,8 @@ struct Slot[
         return self.offset
 
     @always_inline
-    def at(self, base: Int) -> UnsafePointer[Scalar[Self.ENCODING.DTYPE], MutAnyOrigin]:
-        return UnsafePointer[Scalar[Self.ENCODING.DTYPE], MutAnyOrigin](
+    def at(self, base: Int) -> UnsafePointer[Scalar[Self.ENCODING.DTYPE], MutUntrackedOrigin]:
+        return UnsafePointer[Scalar[Self.ENCODING.DTYPE], MutUntrackedOrigin](
             unsafe_from_address=base + self.offset)
 
     @always_inline
@@ -164,10 +164,10 @@ struct Slot[
         var cs_off = member_rel_off[
             Self.ENCODING, Self.SHAPE, Self.QUANT, QuantRole.COLSUM](degree)
         var base = ctx.layer_address() + self.offset
-        var data = UnsafePointer[Int8, MutAnyOrigin](unsafe_from_address=base)
-        var scale = UnsafePointer[Float32, MutAnyOrigin](
+        var data = UnsafePointer[Int8, MutUntrackedOrigin](unsafe_from_address=base)
+        var scale = UnsafePointer[Float32, MutUntrackedOrigin](
             unsafe_from_address=base + scale_off)
-        var colsum = UnsafePointer[Float32, MutAnyOrigin](
+        var colsum = UnsafePointer[Float32, MutUntrackedOrigin](
             unsafe_from_address=base + cs_off)
         return ButterquantWeight[Self.QUANT, o](
             ctx.bind(data), ctx.bind(scale), ctx.bind(colsum))
@@ -184,7 +184,7 @@ struct Slot[
         ), "Slot.bq_router requires a router-centered slot."
         var degree = ctx.degree()
         var base = ctx.layer_address() + self.offset
-        var centered = ctx.bind(UnsafePointer[BFloat16, MutAnyOrigin](
+        var centered = ctx.bind(UnsafePointer[BFloat16, MutUntrackedOrigin](
             unsafe_from_address=base))
         var gauge = Optional[Binding[BFloat16, o]](None)
         var bias = Optional[Binding[Float32, o]](None)
@@ -192,13 +192,13 @@ struct Slot[
             var gauge_off = member_rel_off[
                 Self.ENCODING, Self.SHAPE, Self.QUANT, QuantRole.GAUGE](degree)
             gauge = Optional[Binding[BFloat16, o]](
-                ctx.bind(UnsafePointer[BFloat16, MutAnyOrigin](
+                ctx.bind(UnsafePointer[BFloat16, MutUntrackedOrigin](
                     unsafe_from_address=base + gauge_off)))
         if has_role[Self.ENCODING, Self.SHAPE, Self.QUANT, QuantRole.BIAS](degree):
             var bias_off = member_rel_off[
                 Self.ENCODING, Self.SHAPE, Self.QUANT, QuantRole.BIAS](degree)
             bias = Optional[Binding[Float32, o]](
-                ctx.bind(UnsafePointer[Float32, MutAnyOrigin](
+                ctx.bind(UnsafePointer[Float32, MutUntrackedOrigin](
                     unsafe_from_address=base + bias_off)))
         return ButterquantRouter[Self.QUANT, o](centered, gauge, bias)
 

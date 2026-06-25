@@ -39,7 +39,7 @@ def pow2_shift(value: Int) -> Int:
 
 @fieldwise_init
 struct PagedKV(KVSlot):
-    var base_rows: UnsafePointer[Int32, MutAnyOrigin]
+    var base_rows: UnsafePointer[Int32, MutUntrackedOrigin]
     var shift: Int
     var row_mask: Int
     var page_mask: Int
@@ -81,10 +81,12 @@ struct KVRunTable(Movable):
         self.runs[len(self.runs) - 1].page_count += 1
 
     @always_inline
-    def row_ptr(self, run_idx: Int) -> UnsafePointer[Int32, MutAnyOrigin]:
-        return UnsafePointer[Int32, MutAnyOrigin](
-            unsafe_from_address=Int(self.base_rows.unsafe_ptr()),
-        ) + Int(self.runs[run_idx].rows_off)
+    def row_ptr(self, run_idx: Int) -> UnsafePointer[Int32, MutUntrackedOrigin]:
+        return self.base_rows.unsafe_ptr().unsafe_mut_cast[
+            True
+        ]().unsafe_origin_cast[
+            MutUntrackedOrigin
+        ]() + Int(self.runs[run_idx].rows_off)
 
 
 @fieldwise_init

@@ -293,9 +293,9 @@ def analyze_trait[
     var mean_high = List[Float32](length=C.HIDDEN, fill=Float32(0))
     var mean_low = List[Float32](length=C.HIDDEN, fill=Float32(0))
     var direction = List[BFloat16](length=C.HIDDEN, fill=BFloat16(0))
-    var mh_ptr: F32Ptr = mean_high.unsafe_ptr()
-    var ml_ptr: F32Ptr = mean_low.unsafe_ptr()
-    var dir_ptr: BF16Ptr = direction.unsafe_ptr()
+    var mh_ptr: F32Ptr = mean_high.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin]()
+    var ml_ptr: F32Ptr = mean_low.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin]()
+    var dir_ptr: BF16Ptr = direction.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin]()
 
     var best_k = -1
     var best_fr = Float64(0)
@@ -304,7 +304,7 @@ def analyze_trait[
         n_full[k] = mean_row_norm[C.HIDDEN](dataset[k])
 
         var energy = List[Float32](length=C.HIDDEN, fill=Float32(0))
-        var e_ptr: F32Ptr = energy.unsafe_ptr()
+        var e_ptr: F32Ptr = energy.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin]()
         accumulate_energy(dataset[k].high_ptr(0), dataset[k].n_high, e_ptr)
         accumulate_energy(dataset[k].low_ptr(0), dataset[k].n_low, e_ptr)
         var sink = top_sink(e_ptr, TOP_SINK_K)

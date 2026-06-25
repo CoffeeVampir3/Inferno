@@ -145,7 +145,7 @@ def build_layer_schedule() -> InlineArray[LayerEntry, C.NUM_LAYERS]:
 comptime LAYER_SCHEDULE = build_layer_schedule()
 
 
-def bake_minimax_gain_inplace(p: UnsafePointer[BFloat16, MutAnyOrigin], count: Int):
+def bake_minimax_gain_inplace(p: UnsafePointer[BFloat16, MutUntrackedOrigin], count: Int):
     comptime width = simd_width_of[DType.bfloat16]()
     var one = SIMD[DType.bfloat16, width](1.0)
     for j in range(0, count, width):
@@ -638,7 +638,7 @@ def attn_qkv_project_norm_rope[
     v_kv: Binding[BFloat16, o],
     cos: Binding[Float32, o],
     sin: Binding[Float32, o],
-    runs: UnsafePointer[KVRunTable, MutAnyOrigin],
+    runs: UnsafePointer[KVRunTable, MutUntrackedOrigin],
     seq_len: Int,
     mut pools: List[P],
     mut prof: Profiler[Profile, N],
@@ -694,7 +694,7 @@ def dispatch_full_attention_qkv[
         max_seq_len,
     ],
     ctx: BindContext[o],
-    runs: UnsafePointer[KVRunTable, MutAnyOrigin],
+    runs: UnsafePointer[KVRunTable, MutUntrackedOrigin],
     seq_len: Int,
     layer_idx: Int,
     local_idx: Int,
@@ -755,7 +755,7 @@ def dispatch_lightning_indexer[
         max_seq_len,
     ],
     ctx: BindContext[o],
-    index_runs: UnsafePointer[KVRunTable, MutAnyOrigin],
+    index_runs: UnsafePointer[KVRunTable, MutUntrackedOrigin],
     seq_len: Int,
     local_idx: Int,
     scratch: TemporalScratchPool,
@@ -829,8 +829,8 @@ def dispatch_msa_attention_qkv[
         max_seq_len,
     ],
     ctx: BindContext[o],
-    runs: UnsafePointer[KVRunTable, MutAnyOrigin],
-    index_runs: UnsafePointer[KVRunTable, MutAnyOrigin],
+    runs: UnsafePointer[KVRunTable, MutUntrackedOrigin],
+    index_runs: UnsafePointer[KVRunTable, MutUntrackedOrigin],
     seq_len: Int,
     layer_idx: Int,
     local_idx: Int,
@@ -1041,7 +1041,7 @@ def dispatch_moe[
 
 def show_weight[
     dt: DType, //,
-](label: StaticString, p: UnsafePointer[Scalar[dt], MutAnyOrigin]):
+](label: StaticString, p: UnsafePointer[Scalar[dt], MutUntrackedOrigin]):
     print(label, p[0])
 
 
@@ -1309,9 +1309,10 @@ struct MinimaxM3[
         var num_emit = emit_plan.count()
         self.run_prefix_copies(schedule)
         self.bind_step_runs(schedule, pages)
-        var full_runs = UnsafePointer(to=self.full_runs).as_unsafe_any_origin()
-        var index_runs = UnsafePointer(
-            to=self.index_runs).as_unsafe_any_origin()
+        var full_runs = UnsafePointer(to=self.full_runs).unsafe_origin_cast[
+            MutUntrackedOrigin]()
+        var index_runs = UnsafePointer(to=self.index_runs).unsafe_origin_cast[
+            MutUntrackedOrigin]()
 
         dispatch_embed_lookup[hidden=C.HIDDEN, scale=embed_scale](
             Span(schedule.tokens),

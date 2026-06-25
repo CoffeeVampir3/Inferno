@@ -172,7 +172,7 @@ struct BqFlashPrefillSlidingKernel[
     head_dim: Int, max_q: Int, gqa_ratio: Int,
     window: Int, cache_size: Int, page_len: Int,
 ](WorkerRangePartitionedKernel):
-    var runs: UnsafePointer[KVRunTable, MutAnyOrigin]
+    var runs: UnsafePointer[KVRunTable, MutUntrackedOrigin]
     var q: I8Ptr
     var qi_bias: F32Ptr
     var f_q: F32Ptr
@@ -269,7 +269,7 @@ struct BqFlashPrefillFullKernel[
     head_dim: Int, num_q: Int, num_kv: Int, gqa_ratio: Int,
     partial_stride: Int,
 ](RangePartitionedKernel):
-    var runs: UnsafePointer[KVRunTable, MutAnyOrigin]
+    var runs: UnsafePointer[KVRunTable, MutUntrackedOrigin]
     var q: I8Ptr
     var qi_bias: F32Ptr
     var f_q: F32Ptr
@@ -366,7 +366,7 @@ def dispatch_bq_sliding_attention[
     v_scale: Binding[Float32, o],
     output: Binding[BFloat16, o],
     partials: Binding[Float32, o],
-    runs: UnsafePointer[KVRunTable, MutAnyOrigin],
+    runs: UnsafePointer[KVRunTable, MutUntrackedOrigin],
     num_q: Int, num_kv: Int, partial_stride: Int, kv_stride: Int,
     seq_len: Int,
     mut pools: List[P],
@@ -438,7 +438,7 @@ def dispatch_bq_full_attention[
     q_local_output: Binding[BFloat16, o],
     partials: Binding[Float32, o],
     segment_scratch: Binding[MergeSegment, o],
-    runs: UnsafePointer[KVRunTable, MutAnyOrigin],
+    runs: UnsafePointer[KVRunTable, MutUntrackedOrigin],
     local_num_q: Int,
     seq_len: Int,
     mut pools: List[P],
@@ -496,7 +496,7 @@ struct BqAttnPrepKernel[
     head_dim: Int, rope_half: Int, pair_stride: Int,
     sqrt_n: Float32, n_eps: Float32,
 ](RangePartitionedKernel):
-    var runs: UnsafePointer[KVRunTable, MutAnyOrigin]
+    var runs: UnsafePointer[KVRunTable, MutUntrackedOrigin]
     var q_src: BF16Ptr
     var k_src: BF16Ptr
     var v_src: BF16Ptr
@@ -601,7 +601,7 @@ def dispatch_bq_attn_prep[
     v_scale: Binding[Float32, o],
     cos_table: Binding[Float32, o],
     sin_table: Binding[Float32, o],
-    runs: UnsafePointer[KVRunTable, MutAnyOrigin],
+    runs: UnsafePointer[KVRunTable, MutUntrackedOrigin],
     num_q: Int, num_kv: Int, cache_degree: Int,
     page_shift: Int, row_mask: Int, page_mask: Int,
     seq_len: Int,

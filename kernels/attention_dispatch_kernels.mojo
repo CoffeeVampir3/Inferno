@@ -46,7 +46,7 @@ def dispatch_flash_sliding[
 ](
     output: Binding[BFloat16, o],
     partials: Binding[Float32, o],
-    runs: UnsafePointer[KVRunTable, MutAnyOrigin],
+    runs: UnsafePointer[KVRunTable, MutUntrackedOrigin],
     num_q: Int,
     partial_stride: Int,
     kv_stride: Int,
@@ -135,7 +135,7 @@ def dispatch_flash_sliding[
 
             dispatch_merge_batched_flash_partials[
                 head_dim, max_worker_count=max_worker_count,
-            ](output, partials, flat_bands.unsafe_ptr().as_unsafe_any_origin(),
+            ](output, partials, flat_bands.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin](),
               num_runs, num_q, partial_stride, pools, prof)
             return
 
@@ -173,7 +173,7 @@ def dispatch_flash_full[
     q_local_output: Binding[BFloat16, o],
     partials: Binding[Float32, o],
     segment_scratch: Binding[MergeSegment, o],
-    runs: UnsafePointer[KVRunTable, MutAnyOrigin],
+    runs: UnsafePointer[KVRunTable, MutUntrackedOrigin],
     num_q: Int,
     local_num_q: Int,
     partial_stride: Int,
@@ -261,7 +261,7 @@ def dispatch_flash_full[
             dispatch_merge_batched_context_partials[
                 head_dim, max_worker_count=max_worker_count,
             ](q_local_output, partials, segment_scratch,
-              flat_bands.unsafe_ptr().as_unsafe_any_origin(), num_runs, num_q,
+              flat_bands.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin](), num_runs, num_q,
               local_num_q, partial_stride, pools, prof)
             return
 
@@ -308,7 +308,7 @@ def dispatch_sliding_attention[
     v_base: Binding[BFloat16, o],
     output: Binding[BFloat16, o],
     partials: Binding[Float32, o],
-    runs: UnsafePointer[KVRunTable, MutAnyOrigin],
+    runs: UnsafePointer[KVRunTable, MutUntrackedOrigin],
     num_q: Int,
     partial_stride: Int,
     kv_stride: Int,
@@ -373,7 +373,7 @@ def dispatch_full_attention[
     q_local_output: Binding[BFloat16, o],
     partials: Binding[Float32, o],
     segment_scratch: Binding[MergeSegment, o],
-    runs: UnsafePointer[KVRunTable, MutAnyOrigin],
+    runs: UnsafePointer[KVRunTable, MutUntrackedOrigin],
     local_num_q: Int,
     seq_len: Int,
     mut pools: List[P],

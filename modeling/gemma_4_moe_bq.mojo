@@ -427,7 +427,7 @@ def dispatch_bq_sliding_attention_qkv[
     ],
     ctx: BindContext[o],
     act: ButterquantActivation[o],
-    runs: UnsafePointer[KVRunTable, MutAnyOrigin],
+    runs: UnsafePointer[KVRunTable, MutUntrackedOrigin],
     seq_len: Int,
     layer_idx: Int,
     scratch: TemporalScratchPool,
@@ -536,7 +536,7 @@ def dispatch_bq_full_attention_qkv[
     ],
     ctx: BindContext[o],
     act: ButterquantActivation[o],
-    runs: UnsafePointer[KVRunTable, MutAnyOrigin],
+    runs: UnsafePointer[KVRunTable, MutUntrackedOrigin],
     seq_len: Int,
     layer_idx: Int,
     scratch: TemporalScratchPool,
@@ -1019,8 +1019,10 @@ struct Gemma4[
             self.steer.record_step(schedule, buf_starts, num_slots)
         self.run_prefix_copies(schedule)
         self.bind_step_runs(schedule, pages)
-        var full_runs = UnsafePointer(to=self.full_runs).as_unsafe_any_origin()
-        var sliding_runs = UnsafePointer(to=self.sliding_runs).as_unsafe_any_origin()
+        var full_runs = UnsafePointer(to=self.full_runs).unsafe_origin_cast[
+            MutUntrackedOrigin]()
+        var sliding_runs = UnsafePointer(to=self.sliding_runs).unsafe_origin_cast[
+            MutUntrackedOrigin]()
 
         dispatch_bq_embed_lookup[
             hidden=C.HIDDEN, scale=embed_scale,

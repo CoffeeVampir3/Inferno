@@ -15,7 +15,7 @@ from .dispatch_heuristics import (
 from .attention_ops import RunSplitBand
 from .profiling import Profiler, DispatchSpan
 
-comptime RunSplitBandPtr = UnsafePointer[RunSplitBand, MutAnyOrigin]
+comptime RunSplitBandPtr = UnsafePointer[RunSplitBand, MutUntrackedOrigin]
 
 
 @fieldwise_init
@@ -164,7 +164,7 @@ struct ContextFinalizeKernel[
 ](WorkerRangePartitionedKernel):
     var config: ContextFlashMergeConfig[Self.head_dim, Self.o, Self.co]
     var q_rank: Int
-    var segment_scratch: UnsafePointer[MergeSegment, MutAnyOrigin]
+    var segment_scratch: UnsafePointer[MergeSegment, MutUntrackedOrigin]
     var num_q: Int
     var local_num_q: Int
     var partial_stride: Int
@@ -386,7 +386,7 @@ struct BatchedContextFinalizeKernel[
     `bands[q_rank * num_runs + i].buf_start` (rank-independent)."""
     var config: BatchedContextMergeConfig[Self.head_dim, Self.o]
     var q_rank: Int
-    var segment_scratch: UnsafePointer[MergeSegment, MutAnyOrigin]
+    var segment_scratch: UnsafePointer[MergeSegment, MutUntrackedOrigin]
     var num_q: Int
     var local_num_q: Int
     var partial_stride: Int

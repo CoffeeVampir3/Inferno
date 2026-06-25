@@ -374,7 +374,7 @@ def gemma4_bake_router_scales[
         var arena_base = arena_bases[rank]
         for i in range(C.NUM_LAYERS):
             var entry = LAYER_SCHEDULE[i]
-            var p: UnsafePointer[BFloat16, MutAnyOrigin]
+            var p: UnsafePointer[BFloat16, MutUntrackedOrigin]
             if entry.kind == LayerKind.FULL:
                 var lb = arena_base + layout.full.base(entry.local_idx)
                 p = layout.full.proto.body.router_scale.at(lb)

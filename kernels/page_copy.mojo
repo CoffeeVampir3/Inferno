@@ -24,8 +24,8 @@ def align_split(offset: Int, total: Int) -> Int:
 
 @fieldwise_init
 struct PageCopyKernel(RangePartitionedKernel):
-    var jobs: UnsafePointer[CopyJob, MutAnyOrigin]
-    var bounds: UnsafePointer[Int, MutAnyOrigin]
+    var jobs: UnsafePointer[CopyJob, MutUntrackedOrigin]
+    var bounds: UnsafePointer[Int, MutUntrackedOrigin]
     var num_jobs: Int
     var arena_base: Int
     var byte_lo: Int
@@ -46,9 +46,9 @@ struct PageCopyKernel(RangePartitionedKernel):
             var seg_end = min(self.bounds[j + 1], hi)
             var off = cursor - self.bounds[j]
             memcpy(
-                dest=UnsafePointer[UInt8, MutAnyOrigin](
+                dest=UnsafePointer[UInt8, MutUntrackedOrigin](
                     unsafe_from_address=self.arena_base + job.dst_off + off),
-                src=UnsafePointer[UInt8, MutAnyOrigin](
+                src=UnsafePointer[UInt8, MutUntrackedOrigin](
                     unsafe_from_address=self.arena_base + job.src_off + off),
                 count=seg_end - cursor)
             cursor = seg_end
@@ -80,10 +80,8 @@ def dispatch_copy_jobs[
         bounds.append(total_bytes)
     if total_bytes == 0:
         return
-    var job_ptr = UnsafePointer[CopyJob, MutAnyOrigin](
-        unsafe_from_address=Int(jobs.unsafe_ptr()))
-    var bounds_ptr = UnsafePointer[Int, MutAnyOrigin](
-        unsafe_from_address=Int(bounds.unsafe_ptr()))
+    var job_ptr = jobs.unsafe_ptr().unsafe_mut_cast[True]().unsafe_origin_cast[MutUntrackedOrigin]()
+    var bounds_ptr = bounds.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin]()
     var base_ptr = arena_bases.unsafe_ptr()
 
     @parameter

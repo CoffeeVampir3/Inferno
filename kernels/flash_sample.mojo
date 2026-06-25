@@ -133,8 +133,8 @@ def absorb_sample_panel[
 ](
     x: BF16Ptr,
     wrow: BF16Ptr,
-    accums: UnsafePointer[SampleAccum[n_max], MutAnyOrigin],
-    params: UnsafePointer[SamplingParams, MutAnyOrigin],
+    accums: UnsafePointer[SampleAccum[n_max], MutUntrackedOrigin],
+    params: UnsafePointer[SamplingParams, MutUntrackedOrigin],
     row_start: Int,
     gidx: Int,
     row_base: Int,
@@ -166,8 +166,8 @@ struct FlashSampleKernel[cols: Int, cap: Float64, n_max: Int, MR: Int](
 ):
     var x: BF16Ptr
     var weight: BF16Ptr
-    var accums: UnsafePointer[SampleAccum[Self.n_max], MutAnyOrigin]
-    var params: UnsafePointer[SamplingParams, MutAnyOrigin]
+    var accums: UnsafePointer[SampleAccum[Self.n_max], MutUntrackedOrigin]
+    var params: UnsafePointer[SamplingParams, MutUntrackedOrigin]
     var num_rows: Int
     var rank_base: Int
     var row_base: Int
@@ -227,7 +227,7 @@ def finalize_outcomes[
 ](
     accums: Binding[SampleAccum[n_max], o],
     params: Binding[SamplingParams, o],
-    outcome: UnsafePointer[SampleOutcome[n_max], MutAnyOrigin],
+    outcome: UnsafePointer[SampleOutcome[n_max], MutUntrackedOrigin],
     num_rows: Int,
     read worker_counts: List[Int],
 ):
@@ -275,7 +275,7 @@ def dispatch_flash_sample_fixed[
     weight: Binding[BFloat16, o],
     accums: Binding[SampleAccum[n_max], o],
     params: Binding[SamplingParams, o],
-    outcome: UnsafePointer[SampleOutcome[n_max], MutAnyOrigin],
+    outcome: UnsafePointer[SampleOutcome[n_max], MutUntrackedOrigin],
     num_rows: Int,
     vocab_per_rank: Int,
     mut pools: List[P],
@@ -287,8 +287,13 @@ def dispatch_flash_sample_fixed[
 
     @parameter
     def make(r: Int) -> K:
-        return K(x[r], weight[r], accums[r], params[r], nr, r * vpr, 0,
-                 0, 0, 0)
+        return K(
+            x[r],
+            weight[r],
+            accums[r],
+            params[r],
+            nr, r * vpr, 0,
+            0, 0, 0)
 
     @parameter
     def total_for(r: Int) -> Int:
@@ -316,7 +321,7 @@ def dispatch_flash_sample[
     weight: Binding[BFloat16, o],
     accums: Binding[SampleAccum[n_max], o],
     params: Binding[SamplingParams, o],
-    outcome: UnsafePointer[SampleOutcome[n_max], MutAnyOrigin],
+    outcome: UnsafePointer[SampleOutcome[n_max], MutUntrackedOrigin],
     num_rows: Int,
     vocab_per_rank: Int,
     mut pools: List[P],

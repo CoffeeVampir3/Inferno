@@ -6,7 +6,7 @@ from simd_math.matrixops import butterfly_shuffle, log2
 from simd_math.ops import sqrt
 
 
-comptime PtrF32 = UnsafePointer[Float32, MutAnyOrigin]
+comptime PtrF32 = UnsafePointer[Float32, MutUntrackedOrigin]
 
 
 def fwht_width[T: DType, block: Int]() -> Int:

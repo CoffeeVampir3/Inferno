@@ -195,8 +195,8 @@ Most origin values are created by the compiler. There are a few ways to specify 
 - **Static origin** — `StaticConstantOrigin` represents immutable values that last for the duration of the program. String literal values have a `StaticConstantOrigin`.
 - **Derived origin** — `origin_of()` returns the origin associated with the value (or values) passed in.
 - **Inferred origin** — inferred parameters can capture the origin of a value passed into a function.
-- **External origins** — `MutExternalOrigin` and `ImmutExternalOrigin` represent values that are not tracked by the lifetime checker, such as dynamically-allocated memory.
-- **Wildcard origins** — `ImmutAnyOrigin` and `MutAnyOrigin` are special cases indicating a reference that might access any live value.
+- **Untracked origins** — `MutUntrackedOrigin` and `ImmutUntrackedOrigin` represent the empty origin: they alias nothing, so the lifetime checker has nothing to track. Use them for memory that comes from outside the Mojo program, such as dynamically-allocated buffers.
+- **Universal origin (unsafe)** — `ImmutUnsafeAnyOrigin` and `MutUnsafeAnyOrigin` might alias anything, defeating lifetime extension and exclusivity checking. The `Unsafe` prefix marks them as an escape hatch slated for deprecation and removal.
 
 #### Static origins
 
@@ -262,13 +262,13 @@ Each branch produces a `Pointer` over a single argument's origin; both widen to 
 
 Since origins are parameters, the compiler can infer an origin value from the argument passed to a function or method. This allows a function to return a value that has the same origin as the argument passed to it.
 
-#### External origins
+#### Untracked origins
 
-`MutExternalOrigin` and `ImmutExternalOrigin` represent values that do not alias any existing value. They point to memory not owned by any other variable, and are therefore not tracked by the lifetime checker. For example, the `alloc()` function returns an `UnsafePointer` to a new dynamically-allocated block of memory, with the origin `MutExternalOrigin`. When you use an unsafe API like this, you're responsible for managing the lifetime yourself.
+`MutUntrackedOrigin` and `ImmutUntrackedOrigin` are the empty origin: they alias nothing, so the lifetime checker has nothing to track. They are the supported tool for interfacing with memory from outside the Mojo program. For example, the `alloc()` function returns an `UnsafePointer` to a new dynamically-allocated block of memory, with the origin `MutUntrackedOrigin`. When you use an unsafe API like this, you're responsible for managing the lifetime yourself.
 
-#### Wildcard origins
+#### Universal origin (unsafe)
 
-`ImmutAnyOrigin` and `MutAnyOrigin` are special cases indicating a reference that might access any live value. Using a pointer with a wildcard origin into a scope effectively disables Mojo's ASAP destruction for any values in that scope, as long as the pointer is live. Wildcard origins are a last resort — prefer a concrete origin parameter wherever you can express one.
+`ImmutUnsafeAnyOrigin` and `MutUnsafeAnyOrigin` are the universal origin: they might alias anything. Using a pointer with the universal origin into a scope effectively disables Mojo's ASAP destruction for any values in that scope, as long as the pointer is live, defeating lifetime extension and exclusivity checking. The `Unsafe` prefix marks them as an escape hatch slated for deprecation and removal — prefer a concrete origin parameter wherever you can express one.
 
 ### `ref` arguments
 
@@ -553,17 +553,17 @@ from std.memory import UnsafePointer, alloc
 
 # Split init: field allocated later in __init__
 struct Pool:
-    var buf: UnsafePointer[Byte, MutAnyOrigin]
+    var buf: UnsafePointer[Byte, MutUntrackedOrigin]
 
     def __init__(out self, n: Int):
-        self.buf = UnsafePointer[Byte, MutAnyOrigin].unsafe_dangling()
+        self.buf = UnsafePointer[Byte, MutUntrackedOrigin].unsafe_dangling()
         # ... preliminary work ...
         self.buf = alloc[Byte](n)
 
 # Nullable: caller may pass nothing
 def sigaltstack(
-    ss: UnsafePointer[StackT, MutAnyOrigin],
-    old: Optional[UnsafePointer[StackT, MutAnyOrigin]] = None,
+    ss: UnsafePointer[StackT, MutUntrackedOrigin],
+    old: Optional[UnsafePointer[StackT, MutUntrackedOrigin]] = None,
 ) -> Int:
     return syscall(NR_sigaltstack, Int(ss),
                    Int(old.value()) if old else 0)

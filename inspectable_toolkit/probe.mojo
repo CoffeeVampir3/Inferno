@@ -25,11 +25,11 @@ struct ContrastSet[cols: Int](Movable):
 
     @always_inline
     def high_ptr(mut self, i: Int) -> BF16Ptr:
-        return self.high.unsafe_ptr() + i * Self.cols
+        return self.high.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin]() + i * Self.cols
 
     @always_inline
     def low_ptr(mut self, i: Int) -> BF16Ptr:
-        return self.low.unsafe_ptr() + i * Self.cols
+        return self.low.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin]() + i * Self.cols
 
     def add_row(mut self, is_high: Bool, src: BF16Ptr):
         if is_high:

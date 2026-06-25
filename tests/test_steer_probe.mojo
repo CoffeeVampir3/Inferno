@@ -196,9 +196,9 @@ def run[
     var mean_low = List[Float32](length=C.HIDDEN, fill=Float32(0))
     var direction = List[BFloat16](length=C.HIDDEN, fill=BFloat16(0))
     var best_direction = List[BFloat16](length=C.HIDDEN, fill=BFloat16(0))
-    var mh_ptr: F32Ptr = mean_high.unsafe_ptr()
-    var ml_ptr: F32Ptr = mean_low.unsafe_ptr()
-    var dir_ptr: BF16Ptr = direction.unsafe_ptr()
+    var mh_ptr: F32Ptr = mean_high.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin]()
+    var ml_ptr: F32Ptr = mean_low.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin]()
+    var dir_ptr: BF16Ptr = direction.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin]()
 
     var best = ProbeResult(
         -1, Float64(0), Float64(0), Float64(0), Float64(0),

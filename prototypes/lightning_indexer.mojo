@@ -129,7 +129,7 @@ def stream_select_blocks[
 struct IndexBlockScoreKernel[
     index_head_dim: Int, num_index_heads: Int, block_size: Int,
 ](RangePartitionedKernel):
-    var runs: UnsafePointer[KVRunTable, MutAnyOrigin]
+    var runs: UnsafePointer[KVRunTable, MutUntrackedOrigin]
     var index_q: BF16Ptr
     var k_base: BF16Ptr
     var partial: F32Ptr
@@ -216,7 +216,7 @@ def dispatch_index_block_scores[
     index_q: Binding[BFloat16, o],
     index_k: Binding[BFloat16, o],
     partial: Binding[Float32, o],
-    runs: UnsafePointer[KVRunTable, MutAnyOrigin],
+    runs: UnsafePointer[KVRunTable, MutUntrackedOrigin],
     block_stride: Int,
     scale: Float32,
     seq_len: Int,
@@ -408,7 +408,7 @@ def dispatch_lightning_indexer[
     index_k: Binding[BFloat16, o],
     block_idx: Binding[Int32, o],
     partial: Binding[Float32, o],
-    runs: UnsafePointer[KVRunTable, MutAnyOrigin],
+    runs: UnsafePointer[KVRunTable, MutUntrackedOrigin],
     scale: Float32,
     seq_len: Int,
     mut pools: List[P],
@@ -459,7 +459,7 @@ def dispatch_minimax_m3_indexer[
     index_k: Binding[BFloat16, o],
     block_idx: Binding[Int32, o],
     partial: Binding[Float32, o],
-    runs: UnsafePointer[KVRunTable, MutAnyOrigin],
+    runs: UnsafePointer[KVRunTable, MutUntrackedOrigin],
     seq_len: Int,
     mut pools: List[P],
     mut prof: Profiler[Profile, N],

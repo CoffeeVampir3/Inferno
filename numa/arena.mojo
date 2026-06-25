@@ -12,7 +12,7 @@ struct NumaArena[alignment: Int = 8, page_size: Int = linux.PageSize.THP_2MB](Mo
         alignment: Alignment in bytes.
         page_size: Page-size policy.
     """
-    var base: Optional[UnsafePointer[UInt8, MutAnyOrigin]]
+    var base: Optional[UnsafePointer[UInt8, MutUntrackedOrigin]]
     var size: Int
     var offset: Int
     var node: Int
@@ -33,7 +33,7 @@ struct NumaArena[alignment: Int = 8, page_size: Int = linux.PageSize.THP_2MB](Mo
     def __bool__(self) -> Bool:
         return self.base != None
 
-    def alloc[T: AnyType](mut self, count: Int = 1) -> Optional[UnsafePointer[T, MutAnyOrigin]]:
+    def alloc[T: AnyType](mut self, count: Int = 1) -> Optional[UnsafePointer[T, MutUntrackedOrigin]]:
         """Bump allocates a T aligned to arena's constraints.
 
         Args:
@@ -102,7 +102,7 @@ struct NumaArena[alignment: Int = 8, page_size: Int = linux.PageSize.THP_2MB](Mo
 
 def mmap_numa_impl[
     prot: Int, flags: Int, use_thp: Bool = False
-](size: Int, node: Int) -> Optional[UnsafePointer[UInt8, MutAnyOrigin]]:
+](size: Int, node: Int) -> Optional[UnsafePointer[UInt8, MutUntrackedOrigin]]:
     var sys = linux.linux_sys()
     var addr = sys.sys_mmap[prot=prot, flags=flags](0, size)
     if addr < 0:
@@ -114,12 +114,12 @@ def mmap_numa_impl[
     if bind_result < 0:
         _ = sys.sys_munmap(addr, size)
         return None
-    return UnsafePointer[UInt8, MutAnyOrigin](unsafe_from_address=addr)
+    return UnsafePointer[UInt8, MutUntrackedOrigin](unsafe_from_address=addr)
 
 def mmap_numa[
     prot: Int = linux.Prot.RW,
     page_size: Int = linux.PageSize.THP_2MB,
-](size: Int, node: Int) -> Optional[UnsafePointer[UInt8, MutAnyOrigin]]:
+](size: Int, node: Int) -> Optional[UnsafePointer[UInt8, MutUntrackedOrigin]]:
     """Allocate anonymous memory bound to a specific NUMA node.
 
     Parameters:

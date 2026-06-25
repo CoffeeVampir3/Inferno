@@ -1,4 +1,5 @@
 from std.algorithm import vectorize
+from std.memory import UnsafePointer
 
 from threading.threading_traits import BurstThreadPool
 from kernels.helpers import (
@@ -101,7 +102,7 @@ struct SteerState(Movable):
 
     @always_inline
     def sink_ptr(mut self) -> BF16Ptr:
-        return self.sink.unsafe_ptr().as_unsafe_any_origin()
+        return self.sink.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin]()
 
     @always_inline
     def captured_ptr(mut self, tap_pos: Int, slot: Int) -> BF16Ptr:

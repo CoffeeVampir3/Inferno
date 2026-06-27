@@ -72,7 +72,7 @@ def prep_head_qk_i8[
 
 @always_inline
 def prep_head_v_i8[
-    head_dim: Int, sqrt_n: Float32, n_eps: Float32,
+    head_dim: Int,
 ](
     src: BF16Ptr, vi_out: I8Ptr,
 ) -> Float32:
@@ -82,11 +82,6 @@ def prep_head_v_i8[
     var r = InlineArray[SIMD[DType.float32, width], regs](uninitialized=True)
     comptime for ri in range(regs):
         r[ri] = (src + ri * width).load[width=width]().cast[DType.float32]()
-
-    var inv_rms = head_inv_rms[head_dim, width, regs, sqrt_n, n_eps](r)
-    var fr = SIMD[DType.float32, width](inv_rms)
-    comptime for ri in range(regs):
-        r[ri] = r[ri] * fr
 
     fwht_apply[DType.float32, head_dim](r)
     return absmax_quantize_head[width, regs](r, vi_out)[0]

@@ -553,7 +553,8 @@ struct BqAttnPrepKernel[
                 ](q_tok + h * Self.head_dim, self.q_norm, cos_row, sin_row,
                   qi_tok + h * Self.head_dim)
                 (self.qi_bias + tok * self.num_q + h)[] = Float32(res[1]) * 128.0
-                (self.f_q + tok * self.num_q + h)[] = res[0]
+                (self.f_q + tok * self.num_q + h)[] = (
+                    res[0] * (Float32(1.0) / Self.sqrt_n))
 
             if pos % self.cache_degree == self.rank:
                 var slot = kv.slot(0, pos // self.cache_degree)
@@ -571,7 +572,7 @@ struct BqAttnPrepKernel[
                       k_dst + h * Self.head_dim)
                     ks_dst[h] = sk[0]
                     var sv = prep_head_v_i8[
-                        Self.head_dim, Self.sqrt_n, Self.n_eps,
+                        Self.head_dim,
                     ](v_tok + h * Self.head_dim, v_dst + h * Self.head_dim)
                     vs_dst[h] = sv
 

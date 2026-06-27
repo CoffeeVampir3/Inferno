@@ -36,9 +36,8 @@ from butterquant_kernels.moe import dispatch_bq_phase2_down
 from butterquant_kernels.head import (
     dispatch_bq_head_prep, dispatch_bq_flash_sample,
 )
-from prototypes.sigmoid_router import (
-    M3RouterCandidate, dispatch_minimax_m3_router,
-)
+from prototypes.sigmoid_router import M3RouterCandidate
+from prototypes.sigmoid_router_rawnorm import dispatch_minimax_m3_router_invrms
 from prototypes.lightning_indexer import dispatch_minimax_m3_indexer
 from prototypes.bq_sparse_attention import (
     dispatch_bq_minimax_m3_sparse_attention,
@@ -62,7 +61,7 @@ from modeling.kv_policy import (
     KVPoolMirror, pool_specs, dispatch_prefix_copies, bind_pool_run_table,
 )
 from quant.recipe import (
-    QuantRecipe, Passthrough, PerRowQuant, PerBlockQuant, RouterCenter,
+    QuantRecipe, Passthrough, GainFold, PerRowQuant, PerBlockQuant,
     SplitGamma, NoGamma, SingleSided, PerRowCs, PerBlockCs, NoColsum,
     VnniPacked, RowMajor,
 )
@@ -109,11 +108,13 @@ comptime HeadEmbed[fwht: Int]: QuantRecipe = PerBlockQuant(
 struct ButterquantRecipes(MinimaxM3Recipes):
     comptime Qkv: QuantRecipe = SplitGainPerRowCs[128, "input_layernorm.weight"]
     comptime Out: QuantRecipe = PlainPerBlockCs[C.HEAD_DIM]
-    comptime IndexProj: QuantRecipe = Passthrough()
+    comptime IndexProj: QuantRecipe = GainFold(
+        "input_layernorm.weight", NORM_GAIN_OFFSET)
     comptime DenseGateUp: QuantRecipe = SplitGainPerRowCs[
         128, "post_attention_layernorm.weight"]
     comptime DenseDown: QuantRecipe = PlainPerBlockCs[128]
-    comptime Router: QuantRecipe = RouterCenter("")
+    comptime Router: QuantRecipe = GainFold(
+        "post_attention_layernorm.weight", NORM_GAIN_OFFSET)
     comptime MoeGateUp: QuantRecipe = SplitGainPerRowCs[
         128, "post_attention_layernorm.weight"]
     comptime MoeDown: QuantRecipe = PlainPerBlockCs[128]
@@ -540,16 +541,12 @@ def bq_lightning_indexer[
     var ikv_ctx = ctx.with_layer(layout.index_kv.base(local_idx))
     var index_k_cache = layout.index_kv.proto.k.binding(ikv_ctx)
 
-    # TODO(bq): the lightning indexer + its Passthrough index_q/k_proj gemms require the
-    # full-gamma bf16 input-norm output (x_hat * gamma), exactly as the reference reads
-    # layout.activations.x_residual. In the bq path input_norm is replaced by
-    # dispatch_bq_norm_quant (emits int8 only) and model_init bakes input_norm to split-gain
-    # sqrt(gamma), so x_residual here does NOT hold the gamma-normed hidden the indexer needs.
-    # Options: (a) keep an unbaked-gamma norm weight + an extra dispatch_rms_norm into a new
-    # bf16 scratch buffer, (b) extend dispatch_bq_norm_quant to also emit the bf16 normed row,
-    # (c) fold sqrt(gamma) into index_q_proj/index_k_proj weights (a recipe change). Wired
-    # against x_residual as a placeholder so block_idx still flows to sparse attention.
-    var x_in = layout.activations.x_residual.state_binding(ctx)
+    # The GainFold recipe folded full input_norm gamma into index_q/k_proj at
+    # quantize time, so projecting the raw residual yields (x * gamma) @ W -- the
+    # gain-normed input the indexer needs, minus the per-token inv_rms factor that
+    # the post-projection per-head RMSNorm cancels anyway (see
+    # smoke_m3_indexer_invrms_cancel).
+    var x_in = layout.activations.x_main.state_binding(ctx)
 
     var index_q = scratch.binding[SC, "index_q"](ctx, plan)
     var index_k = scratch.binding[SC, "index_k"](ctx, plan)
@@ -777,25 +774,24 @@ def bq_m3_router[
 ):
     var degree = ctx.degree()
     var experts_per_rank = C.NUM_EXPERTS // degree
+    comptime sqrt_n = sqrt[DType.float32, 1](C.HIDDEN)
+    comptime n_eps = Float32(C.HIDDEN) * C.RMS_NORM_EPS
     var cands = scratch.binding[MinimaxM3MoeScratch, "cands"](ctx, plan)
     var route_idx = scratch.binding[MinimaxM3MoeScratch, "route_idx"](ctx, plan)
     var route_w = scratch.binding[MinimaxM3MoeScratch, "route_w"](ctx, plan)
 
-    # TODO(bq): dispatch_minimax_m3_router (prototypes/sigmoid_router.mojo) takes the
-    # full-gamma bf16 post_attn_norm output as x plus a raw F32 router_gate + F32 router_bias.
-    # Two gaps here: (a) like the indexer, no gamma-normed bf16 input exists in the bq path
-    # (post_attn_norm is baked to sqrt(gamma) and norm_quant emits int8 only) -- x_main passed
-    # below is the UN-normed residual, a placeholder. (b) the Router=RouterCenter("") recipe
-    # expects router_gate centered, but model_init does not bake router centering (cf.
-    # gemma4_bake_router_scales). Resolve by either adding a center-bake in model_init so the
-    # F32 router_gate is drop-in, or light-altering dispatch_minimax_m3_router to consume a
-    # centered/bq_router binding + gauge. Also resolve the bf16 normed-input source.
-    dispatch_minimax_m3_router[max_worker_count=max_worker_count](
-        x_main,
-        sl.moe.router_gate.binding(layer_ctx),
-        sl.moe.router_bias.binding(layer_ctx),
-        cands, route_idx, route_w,
-        experts_per_rank, seq_len, pools, prof)
+    # x_main is the raw post-attention residual; the router fuses the post_attn
+    # RMSNorm in-kernel as a per-token inv_rms scalar, and the GainFold recipe
+    # folded the full gamma column-wise into router_gate at quantize time. logit =
+    # inv_rms * dot(x_main, gamma*router_gate) == dot(post_attn_norm(x_main),
+    # router_gate), so no gamma-normed bf16 buffer and no router centering needed.
+    dispatch_minimax_m3_router_invrms[
+        sqrt_n=sqrt_n, n_eps=n_eps, max_worker_count=max_worker_count,
+    ](x_main,
+      sl.moe.router_gate.binding(layer_ctx),
+      sl.moe.router_bias.binding(layer_ctx),
+      cands, route_idx, route_w,
+      experts_per_rank, seq_len, pools, prof)
 
 
 def bq_moe[

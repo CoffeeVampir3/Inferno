@@ -110,9 +110,11 @@ struct BqFlashSampleKernel[
                     wrow, wsc, Self.cols)
                 var p = (self.params + row)[]
                 var inv_t = Float32(1.0) / p.temperature
-                var y = softcap_value[Self.cap](
-                    SIMD[DType.float32, 1](raw)).cast[DType.bfloat16]().cast[
-                    DType.float32]()
+                var capped = SIMD[DType.float32, 1](raw)
+                comptime
+                if Self.cap > 0.0:
+                    capped = softcap_value[Self.cap](capped)
+                var y = capped.cast[DType.bfloat16]().cast[DType.float32]()
                 var g = Float32(0.0) if p.greedy else gumbel_noise(
                     p.seed, rng_counter(self.row_base + row, gidx))
                 (base + row)[].absorb(y, gidx, inv_t, g, Self.n_max)

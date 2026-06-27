@@ -63,6 +63,12 @@ struct PassthroughPlan(Copyable, Movable):
 
 
 @fieldwise_init
+struct GainFoldPlan(Copyable, Movable):
+    var id: SlotIdentity
+    var gamma: GammaRef
+
+
+@fieldwise_init
 struct QuantPlan(Copyable, Movable):
     var id: SlotIdentity
     var per_block: Bool
@@ -88,7 +94,7 @@ struct RouterPlan(Copyable, Movable):
     var bias_src_dtype: DType
 
 
-comptime SlotPlan = Variant[PassthroughPlan, QuantPlan, RouterPlan]
+comptime SlotPlan = Variant[PassthroughPlan, GainFoldPlan, QuantPlan, RouterPlan]
 
 
 @fieldwise_init

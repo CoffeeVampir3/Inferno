@@ -114,11 +114,25 @@ struct Passthrough(Copyable, Movable, ImplicitlyCopyable):
 
 
 @fieldwise_init
+struct GainFold(Copyable, Movable, ImplicitlyCopyable):
+    """A weight with a per-input-column norm gain folded in at quantize time:
+    out[o, j] = src[o, j] * (gamma[j] + offset). The kernel then consumes the
+    raw (un-normed) residual because the projection already carries the gain.
+    Same on-disk layout and dtype as a passthrough -- only the values change."""
+    var name: StaticString
+    var offset: Float32
+
+    @implicit
+    def __init__(out self, name: StaticString):
+        self = Self(name, 0.0)
+
+
+@fieldwise_init
 struct NormGain(Copyable, Movable, ImplicitlyCopyable):
     var offset: Float32
 
 
 comptime QuantRecipe = Variant[
     Passthrough, NormGain, PerRowQuant, PerBlockQuant, RouterCenter,
-    SoftmaxRouterCenter,
+    SoftmaxRouterCenter, GainFold,
 ]

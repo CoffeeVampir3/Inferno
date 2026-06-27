@@ -25,15 +25,16 @@ from butterquant.kernels import (
     apply_gamma_in_place, gamma_sqrt_abs_in_place, add_offset_in_place,
     rotate_and_quant, router_center, router_center_softmax,
 )
+from butterquant.convert import store_out
 
 from quant.recipe import (
     QuantRecipe, Passthrough, NormGain, PerRowQuant, PerBlockQuant, RouterCenter,
-    SoftmaxRouterCenter, SplitGamma, AbsorbedGamma, TwoSided,
+    SoftmaxRouterCenter, GainFold, SplitGamma, AbsorbedGamma, TwoSided,
     GammaMode, RotationMode,
 )
 from quant.plan import (
-    SlotIdentity, GammaRef, PassthroughPlan, QuantPlan, RouterPlan, SlotPlan,
-    ScratchCapacity,
+    SlotIdentity, GammaRef, PassthroughPlan, GainFoldPlan, QuantPlan, RouterPlan,
+    SlotPlan, ScratchCapacity,
 )
 from quant.manifest import quant_manifest, QuantRole
 
@@ -156,6 +157,27 @@ def decode_to_f32(dt: DType, src: PtrU8, dst: PtrF32, count: Int) -> Bool:
         return True
     if dt == DType.float16:
         decode_from[DType.float16](src, dst, count)
+        return True
+    return False
+
+
+def encode_into[dt: DType](src: PtrF32, dst: PtrU8, count: Int):
+    var p = dst.bitcast[Scalar[dt]]()
+    var k = 0
+    while k + W <= count:
+        store_out[dt, W]((src + k).load[width=W](), p + k)
+        k += W
+    while k < count:
+        store_out[dt, 1]((src + k).load[width=1](), p + k)
+        k += 1
+
+
+def encode_from_f32(dt: DType, src: PtrF32, dst: PtrU8, count: Int) -> Bool:
+    if dt == DType.bfloat16:
+        encode_into[DType.bfloat16](src, dst, count)
+        return True
+    if dt == DType.float32:
+        encode_into[DType.float32](src, dst, count)
         return True
     return False
 
@@ -538,6 +560,14 @@ struct Quantizer(Movable):
             self.plan_passthrough(full, local, layer_idx, loc,
                 offs[QuantRole.WEIGHT], offset=QV[NormGain].offset)
 
+        comptime if QV.isa[GainFold]():
+            comptime QT = QV[GainFold]
+            var gamma = GammaRef.named(
+                prefix + String(QT.name), True, QT.offset)
+            if not self.plan_gainfold(full, local, layer_idx, loc, gamma^,
+                weight_off=offs[QuantRole.WEIGHT]):
+                return False
+
         comptime if QV.isa[PerRowQuant]():
             comptime QT = QV[PerRowQuant]
             if not self.plan_quant(full, local, layer_idx, loc,
@@ -590,6 +620,33 @@ struct Quantizer(Movable):
             weight_off=weight_off,
         )
         self.slots.append(PassthroughPlan(id^, bytes, offset))
+
+    def plan_gainfold(
+        mut self, name: String, local: String, layer_idx: Int,
+        loc: LocatedTensor, var gamma: GammaRef, weight_off: Int,
+    ) -> Bool:
+        if loc.rows <= 0 or loc.cols <= 0:
+            print(t"quant plan: invalid gainfold shape for {name}: {loc.rows}x{loc.cols}")
+            return False
+        if not supports_decode_to_f32(loc.dtype):
+            print(t"quant plan: unsupported gainfold dtype for {name}: {loc.dtype}")
+            return False
+        if not self.locate_gamma(gamma, loc.cols):
+            return False
+        var panel_rows = min(PANEL_ROWS, loc.rows)
+        var panel_elems = panel_rows * loc.cols
+        self.scratch_cap.absorb_raw(panel_elems * size_of_dtype(loc.dtype))
+        self.scratch_cap.absorb_raw(loc.cols * 4)
+        self.scratch_cap.absorb_f32_work(panel_elems)
+        self.scratch_cap.absorb_f32_gamma(loc.cols)
+        var id = SlotIdentity(
+            name=name, local_name=local, layer_idx=layer_idx,
+            shard=loc.shard, src_offset=loc.data_start,
+            src_dtype=loc.dtype, rows=loc.rows, cols=loc.cols,
+            weight_off=weight_off,
+        )
+        self.slots.append(GainFoldPlan(id^, gamma^))
+        return True
 
     def locate_gamma(mut self, mut g: GammaRef, expected_cols: Int) -> Bool:
         var loc_opt = find_tensor(g.name, as_mut_untracked_span(self.headers))
@@ -837,6 +894,8 @@ def gamma_label(ref g: GammaRef) -> StaticString:
 def slot_name(read plan: SlotPlan) -> String:
     if plan.isa[PassthroughPlan]():
         return plan[PassthroughPlan].id.name
+    if plan.isa[GainFoldPlan]():
+        return plan[GainFoldPlan].id.name
     if plan.isa[QuantPlan]():
         return plan[QuantPlan].id.name
     if plan.isa[RouterPlan]():
@@ -905,6 +964,8 @@ struct QuantWorker(Movable):
         self.log_slot(plan)
         if plan.isa[PassthroughPlan]():
             return self.do_passthrough(plan[PassthroughPlan])
+        if plan.isa[GainFoldPlan]():
+            return self.do_gainfold(plan[GainFoldPlan].copy())
         if plan.isa[QuantPlan]():
             return self.do_quant(plan[QuantPlan])
         if plan.isa[RouterPlan]():
@@ -919,6 +980,10 @@ struct QuantWorker(Movable):
             ref pp = plan[PassthroughPlan]
             self.log_line(pp.id,
                 t"passthrough {dtype_tag(pp.id.src_dtype)} {pp.byte_count}B")
+        elif plan.isa[GainFoldPlan]():
+            ref gf = plan[GainFoldPlan]
+            self.log_line(gf.id,
+                t"gain-fold {dtype_tag(gf.id.src_dtype)} γ={gf.gamma.name}")
         elif plan.isa[QuantPlan]():
             var qp = plan[QuantPlan].copy()
             var shape = StaticString("per-block") if qp.per_block else StaticString("per-row")
@@ -1010,6 +1075,52 @@ struct QuantWorker(Movable):
                     self.scratch.raw()):
                 return False
             copied += n
+        return True
+
+    def do_gainfold(mut self, var p: GainFoldPlan) -> Bool:
+        var src_bytes_per = size_of_dtype(p.id.src_dtype)
+        if (p.id.src_dtype != DType.bfloat16
+                and p.id.src_dtype != DType.float32):
+            print(t"quant: gainfold supports bf16/f32 source; got {p.id.src_dtype}")
+            return False
+        # Full gamma (sqrt skipped via absorbed=True) lands in f32 scratch first;
+        # its transient use of raw() is done before the panel loop reuses raw().
+        var g = self.get_gamma(p.gamma)
+        if not g:
+            return False
+        var gp = g.value()
+
+        var pr = min(PANEL_ROWS, p.id.rows)
+        var row_off = 0
+        while row_off < p.id.rows:
+            var panel_rows = min(pr, p.id.rows - row_off)
+            var panel_elems = panel_rows * p.id.cols
+            var panel_bytes = panel_elems * src_bytes_per
+            if panel_bytes > self.scratch.raw_bytes():
+                print("quant: gainfold source panel exceeds scratch")
+                return False
+            if panel_elems > self.scratch.work_count():
+                print("quant: gainfold work panel exceeds scratch")
+                return False
+            var src_off = p.id.src_offset + row_off * p.id.cols * src_bytes_per
+            if not read_sync(self.ring, p.id.shard, src_off, panel_bytes,
+                    self.scratch.raw()):
+                return False
+            var work = self.scratch.work()
+            if not decode_to_f32(p.id.src_dtype, self.scratch.raw(),
+                    work, panel_elems):
+                return False
+            for r in range(panel_rows):
+                apply_gamma_in_place(work + r * p.id.cols, gp, p.id.cols)
+            if not encode_from_f32(p.id.src_dtype, work, self.scratch.raw(),
+                    panel_elems):
+                return False
+            var w_off = (self.data_start + p.id.weight_off
+                + row_off * p.id.cols * src_bytes_per)
+            if not write_sync(self.ring, self.output_fd_idx, w_off,
+                    panel_bytes, self.scratch.raw()):
+                return False
+            row_off += panel_rows
         return True
 
     def do_quant(mut self, p: QuantPlan) -> Bool:

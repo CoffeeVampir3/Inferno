@@ -35,13 +35,13 @@ def arena_bases(
 
 def arena_alloc_all[T: AnyType](
     mut arenas: List[NumaArena[alignment=ALIGNMENT]], count: Int,
-) -> UnsafePointer[T, MutAnyOrigin]:
-    var first = UnsafePointer[T, MutAnyOrigin].unsafe_dangling()
+) -> UnsafePointer[T, MutUntrackedOrigin]:
+    var first = UnsafePointer[T, MutUntrackedOrigin].unsafe_dangling()
     for r in range(len(arenas)):
         var p = arenas[r].alloc[T](count)
         if not p:
             print("arena alloc failed for", count, "elements")
-            return UnsafePointer[T, MutAnyOrigin].unsafe_dangling()
+            return UnsafePointer[T, MutUntrackedOrigin].unsafe_dangling()
         if r == 0:
             first = p.value()
     return first
@@ -94,7 +94,8 @@ def run_indexer[P: BurstThreadPool, //](
     var num_pages = (num_local_rows + rows_per_page - 1) // rows_per_page
     for g in range(num_pages):
         runs_table.add_base_row(Int32(g * rows_per_page))
-    var runs = UnsafePointer(to=runs_table).as_unsafe_any_origin()
+    var runs = UnsafePointer(to=runs_table).unsafe_origin_cast[
+        MutUntrackedOrigin]()
 
     var prof = Profiler[False]()
     var index_q = view.bind(index_q_ptr)

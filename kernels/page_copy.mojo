@@ -91,3 +91,4 @@ def dispatch_copy_jobs[
     fanout_dispatch[
         make, max_worker_count=max_worker_count, label="page_copy",
     ](pools, prof, total_bytes, total_bytes)
+    _ = bounds^

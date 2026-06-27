@@ -46,6 +46,20 @@ def bake_split_gain_in_place(gamma: PtrBF16, cols: Int, eps: Float32 = 1e-12):
 
 
 @always_inline
+def add_offset_in_place[dt: DType](gain: SrcPtr[dt], count: Int, offset: Float32):
+    var add = SIMD[DType.float32, WIDTH](offset)
+    var k = 0
+    while k + WIDTH <= count:
+        var v = (gain + k).load[width=WIDTH]().cast[DType.float32]() + add
+        comptime
+        if dt == DType.bfloat16:
+            store_bf16[WIDTH](v, (gain + k).bitcast[BFloat16]())
+        else:
+            (gain + k).store(v.cast[dt]())
+        k += WIDTH
+
+
+@always_inline
 def row_absmax(work_row: PtrF32, cols: Int) -> Float32:
     var vmax = SIMD[DType.float32, WIDTH](0)
     var k = 0

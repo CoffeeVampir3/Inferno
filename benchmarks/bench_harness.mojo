@@ -8,14 +8,16 @@ comptime DEFAULT_SAMPLES = 600
 
 
 struct SampleBuffer:
-    var kernel_ns: UnsafePointer[Int64, MutAnyOrigin]
-    var wall_ns: UnsafePointer[Int64, MutAnyOrigin]
+    var kernel_ns: UnsafePointer[Int64, MutUntrackedOrigin]
+    var wall_ns: UnsafePointer[Int64, MutUntrackedOrigin]
     var n: Int
     var cap: Int
 
     def __init__(out self, cap: Int = DEFAULT_SAMPLES):
-        self.kernel_ns = alloc[Int64](cap).as_any_origin()
-        self.wall_ns = alloc[Int64](cap).as_any_origin()
+        self.kernel_ns = alloc[Int64](cap).unsafe_origin_cast[
+            MutUntrackedOrigin]()
+        self.wall_ns = alloc[Int64](cap).unsafe_origin_cast[
+            MutUntrackedOrigin]()
         self.n = 0
         self.cap = cap
 
@@ -49,7 +51,7 @@ struct Stats(Copyable, ImplicitlyCopyable):
     var n: Int
 
 
-def sort_in_place(p: UnsafePointer[Int64, MutAnyOrigin], n: Int):
+def sort_in_place(p: UnsafePointer[Int64, MutUntrackedOrigin], n: Int):
     for i in range(1, n):
         var v = p[i]
         var j = i - 1
@@ -59,7 +61,7 @@ def sort_in_place(p: UnsafePointer[Int64, MutAnyOrigin], n: Int):
         p[j + 1] = v
 
 
-def compute_stats(p: UnsafePointer[Int64, MutAnyOrigin], n: Int) -> Stats:
+def compute_stats(p: UnsafePointer[Int64, MutUntrackedOrigin], n: Int) -> Stats:
     if n <= 0:
         return Stats(0, 0, 0, 0, 0, 0, 0)
     sort_in_place(p, n)

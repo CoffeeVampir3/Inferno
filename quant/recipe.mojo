@@ -9,11 +9,21 @@ struct NoGamma(Copyable, Movable, ImplicitlyCopyable):
 @fieldwise_init
 struct SplitGamma(Copyable, Movable, ImplicitlyCopyable):
     var name: StaticString
+    var offset: Float32
+
+    @implicit
+    def __init__(out self, name: StaticString):
+        self = Self(name, 0.0)
 
 
 @fieldwise_init
 struct AbsorbedGamma(Copyable, Movable, ImplicitlyCopyable):
     var name: StaticString
+    var offset: Float32
+
+    @implicit
+    def __init__(out self, name: StaticString):
+        self = Self(name, 0.0)
 
 
 comptime GammaMode = Variant[NoGamma, SplitGamma, AbsorbedGamma]
@@ -103,7 +113,12 @@ struct Passthrough(Copyable, Movable, ImplicitlyCopyable):
     pass
 
 
+@fieldwise_init
+struct NormGain(Copyable, Movable, ImplicitlyCopyable):
+    var offset: Float32
+
+
 comptime QuantRecipe = Variant[
-    Passthrough, PerRowQuant, PerBlockQuant, RouterCenter,
+    Passthrough, NormGain, PerRowQuant, PerBlockQuant, RouterCenter,
     SoftmaxRouterCenter,
 ]

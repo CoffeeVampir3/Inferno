@@ -221,6 +221,8 @@ def run[
             best_k = k
             for i in range(C.HIDDEN):
                 best_direction[i] = direction[i]
+    _ = mean_high^
+    _ = mean_low^
     print()
     print(t"selected layer {best.layer} (fisher ratio {best.fr})")
 

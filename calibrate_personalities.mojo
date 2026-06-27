@@ -294,6 +294,7 @@ def semantic_norm(mut data: ContrastSet[C.HIDDEN]) -> Float64:
     var sink = find_sinks(e_ptr, Float64(SINK_ENERGY_FACTOR))
     var sem_hi = semantic_norm_rows(data.high_ptr(0), data.n_high, sink)
     var sem_lo = semantic_norm_rows(data.low_ptr(0), data.n_low, sink)
+    _ = energy^
     return (
         sem_hi * Float64(data.n_high) + sem_lo * Float64(data.n_low)
     ) / Float64(n)
@@ -527,6 +528,8 @@ def select_layer[
             dataset[k], model.steer.tap_layers[k], mh_ptr, ml_ptr, dir_ptr)
         results.append(r)
         n_sem[k] = semantic_norm(dataset[k])
+    _ = mean_high^
+    _ = mean_low^
     for k in range(NUM_TAP_LAYERS - 1):
         var a_high = dataset[k].high_ptr(0)
         var a_low = dataset[k].low_ptr(0)
@@ -624,6 +627,8 @@ def finalize_trait[
         mean_low.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin](),
         composite.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin]())
     var composite_ptr: BF16Ptr = composite.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin]()
+    _ = mean_high^
+    _ = mean_low^
 
     model.set_steer_vector(slot, composite)
     model.steer.clear_inject()
@@ -649,6 +654,7 @@ def finalize_trait[
         eval_high.row_ptr(0), eval_high.count, composite_ptr)
     var lo_stats = projection_stats[C.HIDDEN](
         eval_low.row_ptr(0), eval_low.count, composite_ptr)
+    _ = composite^
     var hd = ProbeResult(
         rec.layer, Float64(0), Float64(0), hi_stats[0], lo_stats[0],
         hi_stats[1], lo_stats[1])

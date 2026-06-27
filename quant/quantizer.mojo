@@ -22,12 +22,12 @@ from modeling.slot import SlotLike, SlotGroup
 from modeling.model_spec import Replicated, Encoding, ShapeLike
 
 from butterquant.kernels import (
-    apply_gamma_in_place, gamma_sqrt_abs_in_place,
+    apply_gamma_in_place, gamma_sqrt_abs_in_place, add_offset_in_place,
     rotate_and_quant, router_center, router_center_softmax,
 )
 
 from quant.recipe import (
-    QuantRecipe, Passthrough, PerRowQuant, PerBlockQuant, RouterCenter,
+    QuantRecipe, Passthrough, NormGain, PerRowQuant, PerBlockQuant, RouterCenter,
     SoftmaxRouterCenter, SplitGamma, AbsorbedGamma, TwoSided,
     GammaMode, RotationMode,
 )
@@ -108,9 +108,11 @@ def supports_router_source(dt: DType) -> Bool:
 @always_inline
 def gamma_ref_from[gam: GammaMode](prefix: String) -> GammaRef:
     comptime if gam.isa[SplitGamma]():
-        return GammaRef.named(prefix + String(gam[SplitGamma].name), False)
+        return GammaRef.named(
+            prefix + String(gam[SplitGamma].name), False, gam[SplitGamma].offset)
     comptime if gam.isa[AbsorbedGamma]():
-        return GammaRef.named(prefix + String(gam[AbsorbedGamma].name), True)
+        return GammaRef.named(
+            prefix + String(gam[AbsorbedGamma].name), True, gam[AbsorbedGamma].offset)
     return GammaRef.none()
 
 
@@ -532,6 +534,10 @@ struct Quantizer(Movable):
             self.plan_passthrough(full, local, layer_idx, loc,
                 offs[QuantRole.WEIGHT])
 
+        comptime if QV.isa[NormGain]():
+            self.plan_passthrough(full, local, layer_idx, loc,
+                offs[QuantRole.WEIGHT], offset=QV[NormGain].offset)
+
         comptime if QV.isa[PerRowQuant]():
             comptime QT = QV[PerRowQuant]
             if not self.plan_quant(full, local, layer_idx, loc,
@@ -570,17 +576,20 @@ struct Quantizer(Movable):
 
     def plan_passthrough(
         mut self, name: String, local: String, layer_idx: Int,
-        loc: LocatedTensor, weight_off: Int,
+        loc: LocatedTensor, weight_off: Int, offset: Float32 = 0.0,
     ):
         var bytes = loc.rows * loc.cols * size_of_dtype(loc.dtype)
-        self.scratch_cap.absorb_raw(min(COPY_CHUNK, bytes))
+        if offset != 0.0:
+            self.scratch_cap.absorb_raw(bytes)
+        else:
+            self.scratch_cap.absorb_raw(min(COPY_CHUNK, bytes))
         var id = SlotIdentity(
             name=name, local_name=local, layer_idx=layer_idx,
             shard=loc.shard, src_offset=loc.data_start,
             src_dtype=loc.dtype, rows=loc.rows, cols=loc.cols,
             weight_off=weight_off,
         )
-        self.slots.append(PassthroughPlan(id^, bytes))
+        self.slots.append(PassthroughPlan(id^, bytes, offset))
 
     def locate_gamma(mut self, mut g: GammaRef, expected_cols: Int) -> Bool:
         var loc_opt = find_tensor(g.name, as_mut_untracked_span(self.headers))
@@ -958,11 +967,34 @@ struct QuantWorker(Movable):
             print(t"quant: unsupported gamma dtype for {g.name}: {g.src_dtype}")
             return None
 
+        if g.offset != 0.0:
+            add_offset_in_place[DType.float32](self.scratch.gamma(), cols, g.offset)
         if not g.absorbed:
             gamma_sqrt_abs_in_place(self.scratch.gamma(), cols)
         return self.scratch.gamma()
 
+    def do_gain(mut self, p: PassthroughPlan) -> Bool:
+        if p.id.src_dtype != DType.bfloat16:
+            print(t"quant: gain offset requires bf16 source for {p.id.name}")
+            return False
+        if p.byte_count > self.scratch.raw_bytes():
+            print("quant: gain tensor exceeds scratch")
+            return False
+        if not read_sync(self.ring, p.id.shard, p.id.src_offset,
+                p.byte_count, self.scratch.raw()):
+            return False
+        add_offset_in_place[DType.bfloat16](
+            self.scratch.raw().bitcast[Scalar[DType.bfloat16]](),
+            p.byte_count // 2, p.offset)
+        if not write_sync(self.ring, self.output_fd_idx,
+                self.data_start + p.id.weight_off, p.byte_count,
+                self.scratch.raw()):
+            return False
+        return True
+
     def do_passthrough(mut self, p: PassthroughPlan) -> Bool:
+        if p.offset != 0.0:
+            return self.do_gain(p)
         var chunk_cap = min(COPY_CHUNK, self.scratch.raw_bytes())
         if chunk_cap <= 0:
             print("quant: passthrough scratch unavailable")
@@ -1063,7 +1095,9 @@ struct QuantWorker(Movable):
             var ops_span = Span[WriteOp[], MutUntrackedOrigin](
                 ptr=UnsafePointer(to=ops[0]).unsafe_origin_cast[MutUntrackedOrigin](),
                 length=n_ops)
-            if not write_sync_many(self.ring, ops_span):
+            var write_ok = write_sync_many(self.ring, ops_span)
+            _ = ops^
+            if not write_ok:
                 return False
 
             row_off += panel_rows

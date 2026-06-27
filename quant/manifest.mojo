@@ -2,7 +2,7 @@ from std.collections import InlineArray
 
 from modeling.model_spec import Encoding, ShapeLike, align_up
 from quant.recipe import (
-    QuantRecipe, Passthrough, PerRowQuant, PerBlockQuant, RouterCenter,
+    QuantRecipe, Passthrough, NormGain, PerRowQuant, PerBlockQuant, RouterCenter,
     SoftmaxRouterCenter, NoColsum, PerRowCs, PerBlockCs, RowMajor,
 )
 
@@ -80,7 +80,7 @@ def quant_manifest[
     var data_m = shape.data_m(degree)
     var out = QuantManifest()
 
-    comptime if quant.isa[Passthrough]():
+    comptime if quant.isa[Passthrough]() or quant.isa[NormGain]():
         out.push(QuantMember(
             role=QuantRole.WEIGHT, suffix=StaticString(""),
             dtype=encoding.DTYPE, element_bytes=encoding.ELEMENT_BYTES,

@@ -85,12 +85,12 @@ struct MeasureState(Movable):
     @always_inline
     def acc_ptr(mut self) -> F32Ptr:
         if self.current_is_bad:
-            return self.bad_acc.unsafe_ptr().as_unsafe_any_origin()
-        return self.good_acc.unsafe_ptr().as_unsafe_any_origin()
+            return self.bad_acc.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin]()
+        return self.good_acc.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin]()
 
     @always_inline
     def scratch_ptr(mut self) -> F32Ptr:
-        return self.scratch.unsafe_ptr().as_unsafe_any_origin()
+        return self.scratch.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin]()
 
     def arm_residual(mut self, is_bad: Bool):
         self.mode = MEASURE_RESIDUAL

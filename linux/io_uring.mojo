@@ -416,7 +416,9 @@ struct IoRing[queue_depth: Int = 2048](Movable):
             ptr=UnsafePointer(to=ops[0]).unsafe_origin_cast[MutUntrackedOrigin](),
             length=1,
         )
-        return self.submit_many[Op](span, 0)
+        var submitted = self.submit_many[Op](span, 0)
+        _ = ops^
+        return submitted
 
     def drain[
         visitor: def(Completion) capturing -> None,

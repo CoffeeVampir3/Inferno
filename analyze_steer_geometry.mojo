@@ -309,6 +309,7 @@ def analyze_trait[
         accumulate_energy(dataset[k].low_ptr(0), dataset[k].n_low, e_ptr)
         var sink = top_sink(e_ptr, TOP_SINK_K)
         sink_frac[k] = energy_fraction(e_ptr, sink)
+        _ = energy^
         var sem_hi = mean_semantic_norm(
             dataset[k].high_ptr(0), dataset[k].n_high, sink)
         var sem_lo = mean_semantic_norm(
@@ -330,6 +331,9 @@ def analyze_trait[
         if r.fr > best_fr:
             best_fr = r.fr
             best_k = k
+    _ = mean_high^
+    _ = mean_low^
+    _ = direction^
 
     for k in range(NUM_TAP_LAYERS - 1):
         var a_high = dataset[k].high_ptr(0)

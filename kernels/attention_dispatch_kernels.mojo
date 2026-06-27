@@ -137,6 +137,7 @@ def dispatch_flash_sliding[
                 head_dim, max_worker_count=max_worker_count,
             ](output, partials, flat_bands.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin](),
               num_runs, num_q, partial_stride, pools, prof)
+            _ = flat_bands^
             return
 
         # Token count saturates the worker budget: the token-partitioned prefill
@@ -263,6 +264,7 @@ def dispatch_flash_full[
             ](q_local_output, partials, segment_scratch,
               flat_bands.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin](), num_runs, num_q,
               local_num_q, partial_stride, pools, prof)
+            _ = flat_bands^
             return
 
         # Token count saturates the worker budget: fall back to the

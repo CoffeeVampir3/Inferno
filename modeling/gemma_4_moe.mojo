@@ -305,7 +305,7 @@ def dispatch_sliding_attention_qkv[
         measure_rows,
     ],
     ctx: BindContext[o],
-    runs: UnsafePointer[KVRunTable, MutAnyOrigin],
+    runs: UnsafePointer[KVRunTable, MutUntrackedOrigin],
     seq_len: Int,
     layer_idx: Int,
     scratch: TemporalScratchPool,
@@ -403,7 +403,7 @@ def dispatch_full_attention_qkv[
         measure_rows,
     ],
     ctx: BindContext[o],
-    runs: UnsafePointer[KVRunTable, MutAnyOrigin],
+    runs: UnsafePointer[KVRunTable, MutUntrackedOrigin],
     seq_len: Int,
     layer_idx: Int,
     scratch: TemporalScratchPool,
@@ -832,8 +832,10 @@ struct Gemma4[
         var num_emit = emit_plan.count()
         self.run_prefix_copies(schedule)
         self.bind_step_runs(schedule, pages)
-        var full_runs = UnsafePointer(to=self.full_runs).as_unsafe_any_origin()
-        var sliding_runs = UnsafePointer(to=self.sliding_runs).as_unsafe_any_origin()
+        var full_runs = UnsafePointer(to=self.full_runs).unsafe_origin_cast[
+            MutUntrackedOrigin]()
+        var sliding_runs = UnsafePointer(to=self.sliding_runs).unsafe_origin_cast[
+            MutUntrackedOrigin]()
 
         dispatch_embed_lookup[
             hidden=C.HIDDEN, scale=embed_scale,

@@ -25,6 +25,7 @@ struct GammaRef(Copyable, Movable):
     sqrt-abs split factor and the raw absorbed gain."""
     var name: String
     var absorbed: Bool
+    var offset: Float32
     var shard: Int
     var src_offset: Int
     var byte_size: Int
@@ -33,11 +34,11 @@ struct GammaRef(Copyable, Movable):
 
     @staticmethod
     def none() -> Self:
-        return Self(String(""), False, 0, 0, 0, DType.float32, 0)
+        return Self(String(""), False, 0.0, 0, 0, 0, DType.float32, 0)
 
     @staticmethod
-    def named(name: String, absorbed: Bool) -> Self:
-        return Self(name, absorbed, 0, 0, 0, DType.float32, 0)
+    def named(name: String, absorbed: Bool, offset: Float32) -> Self:
+        return Self(name, absorbed, offset, 0, 0, 0, DType.float32, 0)
 
     def is_present(self) -> Bool:
         return self.name.byte_length() > 0
@@ -58,6 +59,7 @@ struct GammaRef(Copyable, Movable):
 struct PassthroughPlan(Copyable, Movable):
     var id: SlotIdentity
     var byte_count: Int
+    var offset: Float32
 
 
 @fieldwise_init

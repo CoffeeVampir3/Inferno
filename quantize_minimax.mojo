@@ -8,7 +8,7 @@ from threading.topological_dispatch import with_topological_rank_dispatch
 from modeling.minimax_m3_bq import MinimaxM3
 
 
-comptime MODEL_DIR = "checkpoints/minimax-m3"
+comptime MODEL_DIR = "checkpoints/minimax-m3-ablit"
 
 
 def main():

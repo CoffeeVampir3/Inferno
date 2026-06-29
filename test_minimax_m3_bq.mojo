@@ -14,7 +14,7 @@ from modeling.minimax_m3_bq import MinimaxM3, PAGE_LEN
 
 
 comptime MODEL_DIR = "checkpoints/minimax-m3-bq"
-comptime TOKENIZER_PATH = "checkpoints/minimax-m3/tokenizer.json"
+comptime TOKENIZER_PATH = "checkpoints/minimax-m3-ablit/tokenizer.json"
 comptime MAX_NEW_TOKENS = 128
 comptime STEP_BUDGET = PAGE_LEN
 

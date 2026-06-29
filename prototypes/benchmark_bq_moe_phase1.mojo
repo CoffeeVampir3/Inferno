@@ -12,11 +12,14 @@ from benchmarks.bench_harness import (
 )
 
 from butterquant.weight import ButterquantWeight, ButterquantActivation
+from butterquant.amx_tiles import prime_amx_environment
 from quant.recipe import (
     QuantRecipe, PerRowQuant, NoGamma, SingleSided, PerRowCs, VnniPacked,
 )
 
-from prototypes.bq_moe_phase1 import dispatch_bq_m3_phase1_gate_up
+from prototypes.bq_moe_phase1 import (
+    dispatch_bq_m3_phase1_gate_up, dispatch_bq_m3_phase1_gate_up_amx,
+)
 
 
 comptime ALIGNMENT = 64
@@ -102,6 +105,23 @@ def run_phase1[P: BurstThreadPool, o: ImmutOrigin, N: Int, //](
     ](act, eoff, routes, weight, bucket, EXPERTS, pools, prof)
 
 
+def run_phase1_amx[P: BurstThreadPool, o: ImmutOrigin, N: Int, //](
+    mut pools: List[P],
+    act: ButterquantActivation[o],
+    eoff: Binding[Int32, o],
+    routes: Binding[SparseRoute, o],
+    weight: ButterquantWeight[Recipe, o],
+    bucket: Binding[BFloat16, o],
+    act_routed: Binding[Int8, o],
+    sa_routed: Binding[Float32, o],
+    mut prof: Profiler[False, N],
+):
+    dispatch_bq_m3_phase1_gate_up_amx[
+        hidden=HIDDEN, gate_up=GATE_UP, inter=INTER,
+    ](act, eoff, routes, weight, bucket, act_routed, sa_routed,
+      EXPERTS, pools, prof)
+
+
 def run_all[P: BurstThreadPool, //](
     var pools: List[P],
     mut arenas: List[NumaArena[alignment=ALIGNMENT]],
@@ -118,6 +138,8 @@ def run_all[P: BurstThreadPool, //](
     var eoff_ptr = arena_alloc_all[Int32](arenas, EXPERTS + 1)
     var routes_ptr = arena_alloc_all[SparseRoute](arenas, MAX_RECORDS)
     var bucket_ptr = arena_alloc_all[BFloat16](arenas, MAX_RECORDS * INTER)
+    var act_routed_ptr = arena_alloc_all[Int8](arenas, MAX_RECORDS * HIDDEN)
+    var sa_routed_ptr = arena_alloc_all[Float32](arenas, MAX_RECORDS)
 
     for r in range(tp):
         fill_i8(view.bind(x_i8_ptr)[r], MAX_SEQ * HIDDEN)
@@ -133,6 +155,10 @@ def run_all[P: BurstThreadPool, //](
     var eoff = view.bind(eoff_ptr)
     var routes = view.bind(routes_ptr)
     var bucket = view.bind(bucket_ptr)
+    var act_routed = view.bind(act_routed_ptr)
+    var sa_routed = view.bind(sa_routed_ptr)
+
+    prime_amx_environment(pools)
 
     var cap = pools[0].get_capacity()
     print(
@@ -152,10 +178,12 @@ def run_all[P: BurstThreadPool, //](
         var n_records = seq * TOP_K
         fill_routing(eoff, routes, n_records, seq, tp)
 
+        var weight_bytes = EXPERTS * GATE_UP * HIDDEN
+        print(t"seq={seq} records={n_records}")
+
         for _ in range(WARMUP):
             run_phase1(pools, act, eoff, routes, weight, bucket, prof)
             keep(bucket[0][0])
-
         s.clear()
         for _ in range(SAMPLES):
             var t0 = now_ns()
@@ -163,10 +191,23 @@ def run_all[P: BurstThreadPool, //](
             var t1 = now_ns()
             s.push(max_last_ts(pools) - t0, t1 - t0)
         keep(bucket[0][0])
+        print_row("  vnni  ",
+            compute_stats(s.kernel_ns, s.n),
+            compute_stats(s.wall_ns, s.n), weight_bytes)
 
-        var weight_bytes = EXPERTS * GATE_UP * HIDDEN
-        print(t"seq={seq} records={n_records}")
-        print_row("  phase1",
+        for _ in range(WARMUP):
+            run_phase1_amx(pools, act, eoff, routes, weight, bucket,
+                           act_routed, sa_routed, prof)
+            keep(bucket[0][0])
+        s.clear()
+        for _ in range(SAMPLES):
+            var t0 = now_ns()
+            run_phase1_amx(pools, act, eoff, routes, weight, bucket,
+                           act_routed, sa_routed, prof)
+            var t1 = now_ns()
+            s.push(max_last_ts(pools) - t0, t1 - t0)
+        keep(bucket[0][0])
+        print_row("  amx   ",
             compute_stats(s.kernel_ns, s.n),
             compute_stats(s.wall_ns, s.n), weight_bytes)
 

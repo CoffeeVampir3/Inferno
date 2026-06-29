@@ -42,7 +42,7 @@ from prototypes.lightning_indexer import dispatch_minimax_m3_indexer
 from prototypes.bq_sparse_attention import (
     dispatch_bq_minimax_m3_sparse_attention,
 )
-from prototypes.bq_moe_phase1 import dispatch_bq_m3_phase1_gate_up
+from prototypes.bq_moe_phase1 import dispatch_bq_m3_phase1_gate_up_amx
 
 from modeling.temporal_scratch import (
     ScratchBuffer, ScratchIsland, ScratchPhase, ScratchPhaseOrder, ScaleClass,
@@ -309,6 +309,10 @@ struct MinimaxM3MoeScratch(ScratchIsland, Copyable, ImplicitlyCopyable):
     var hidden_bucket: ScratchBuffer[
         BFloat16, PAGE_LEN * C.TOP_K * C.MOE_INTERMEDIATE,
     ]
+
+    var routed_band: ScratchPhase["phase1", "phase1"]
+    var act_routed: ScratchBuffer[Int8, PAGE_LEN * C.TOP_K * C.HIDDEN]
+    var sa_routed: ScratchBuffer[Float32, PAGE_LEN * C.TOP_K]
 
     var bucket_i8_band: ScratchPhase["bucket_quant", "phase2"]
     var bucket_i8: ScratchBuffer[Int8, PAGE_LEN * C.TOP_K * C.MOE_INTERMEDIATE]
@@ -826,6 +830,10 @@ def bq_moe[
         MinimaxM3MoeScratch, "moe_x_row_workspace"](ctx, plan)
     var hidden_bucket = scratch.binding[
         MinimaxM3MoeScratch, "hidden_bucket"](ctx, plan)
+    var act_routed = scratch.binding[
+        MinimaxM3MoeScratch, "act_routed"](ctx, plan)
+    var sa_routed = scratch.binding[
+        MinimaxM3MoeScratch, "sa_routed"](ctx, plan)
     var bucket_i8 = scratch.binding[MinimaxM3MoeScratch, "bucket_i8"](ctx, plan)
     var bucket_sa = scratch.binding[MinimaxM3MoeScratch, "bucket_sa"](ctx, plan)
     var bucket_row_workspace = scratch.binding[
@@ -856,12 +864,12 @@ def bq_moe[
     ](route_idx, route_w, expert_offset, routes,
       experts_per_rank, seq_len, pools, prof)
 
-    dispatch_bq_m3_phase1_gate_up[
+    dispatch_bq_m3_phase1_gate_up_amx[
         hidden=C.HIDDEN, gate_up=C.MOE_GATE_UP_FUSED, inter=C.MOE_INTERMEDIATE,
         max_worker_count=max_worker_count,
     ](moe_act, expert_offset, routes,
       sl.moe.experts_gate_up.bq_weight(layer_ctx), hidden_bucket,
-      experts_per_rank, pools, prof)
+      act_routed, sa_routed, experts_per_rank, pools, prof)
 
     var num_routes = seq_len * C.TOP_K
     dispatch_bq_block_quant[

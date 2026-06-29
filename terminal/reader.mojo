@@ -83,6 +83,49 @@ struct RawGuard(Movable):
                 self.fd, UnsafePointer(to=self.saved))
 
 
+struct CancelWatch(Movable):
+    var fd: Int
+    var saved: linux.Termios
+    var active: Bool
+
+    def __init__(out self, fd: Int = 0):
+        self.fd = fd
+        self.saved = linux.Termios()
+        self.active = False
+        var sys = linux.linux_sys()
+        if sys.sys_tcgetattr(self.fd, UnsafePointer(to=self.saved)) != 0:
+            return
+        var work = self.saved.copy()
+        work.c_lflag &= ~UInt32(
+            linux.TermLocalFlag.ICANON | linux.TermLocalFlag.ECHO
+            | linux.TermLocalFlag.ISIG)
+        work.c_cc[linux.TermControlChar.VMIN] = UInt8(0)
+        work.c_cc[linux.TermControlChar.VTIME] = UInt8(0)
+        _ = sys.sys_tcsetattr(self.fd, UnsafePointer(to=work))
+        self.active = True
+
+    def __del__(deinit self):
+        if self.active:
+            _ = linux.linux_sys().sys_tcsetattr(
+                self.fd, UnsafePointer(to=self.saved))
+
+    def triggered(self) -> Bool:
+        if not self.active:
+            return False
+        var sys = linux.linux_sys()
+        var byte = Byte(0)
+        var hit = False
+        while True:
+            var rc = sys.sys_read(self.fd, Int(UnsafePointer(to=byte)), 1)
+            if rc == linux.EINTR:
+                continue
+            if rc <= 0:
+                break
+            if byte == ESC or byte == CTRL_C:
+                hit = True
+        return hit
+
+
 struct TerminalReader(Movable):
     var fd: Int
     var buf: List[Byte]

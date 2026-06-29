@@ -868,6 +868,18 @@ def bq_moe[
     ](route_idx, route_w, expert_offset, routes,
       experts_per_rank, seq_len, pools, prof)
 
+    comptime if Profile:
+        var total_load = 0
+        var max_load = 0
+        for r in range(degree):
+            var load = Int(expert_offset[r][experts_per_rank])
+            total_load += load
+            if load > max_load:
+                max_load = load
+        if total_load > 0:
+            prof.record_scalar(
+                "moe_imbalance", max_load * degree * 1000 // total_load)
+
     dispatch_bq_m3_phase1_gate_up_amx[
         hidden=C.HIDDEN, gate_up=C.MOE_GATE_UP_FUSED, inter=C.MOE_INTERMEDIATE,
         max_worker_count=max_worker_count,

@@ -211,6 +211,17 @@ struct ProfileRecord(Copyable, Movable):
         self.compute.add(compute_ns)
         self.join.add(join_ns)
 
+
+struct ScalarRecord(Copyable, Movable):
+    var label: StaticString
+    var metric: ReservoirMetric[]
+
+    @always_inline
+    def __init__(out self, label: StaticString = ""):
+        self.label = label
+        self.metric = ReservoirMetric[]()
+
+
 struct Profiler[Profile: Bool, N: Int = 64](Copyable, Movable):
     """Per-dispatch timing sink with bounded per-label statistics.
 
@@ -222,12 +233,16 @@ struct Profiler[Profile: Bool, N: Int = 64](Copyable, Movable):
     var records: InlineArray[ProfileRecord, Self.CAP]
     var count: Int
     var wall_ns: Int  # true elapsed forward time over the current window
+    var scalars: InlineArray[ScalarRecord, Self.CAP]
+    var scalar_count: Int
 
     @always_inline
     def __init__(out self):
         self.records = InlineArray[ProfileRecord, Self.CAP](fill=ProfileRecord())
         self.count = 0
         self.wall_ns = 0
+        self.scalars = InlineArray[ScalarRecord, Self.CAP](fill=ScalarRecord())
+        self.scalar_count = 0
 
     @always_inline
     def add_wall(mut self, ns: Int):
@@ -248,10 +263,23 @@ struct Profiler[Profile: Bool, N: Int = 64](Copyable, Movable):
                 self.count += 1
 
     @always_inline
+    def record_scalar(mut self, label: StaticString, value: Int):
+        comptime if Self.Profile:
+            for i in range(self.scalar_count):
+                if self.scalars[i].label == label:
+                    self.scalars[i].metric.add(value)
+                    return
+            if self.scalar_count < Self.N:
+                self.scalars[self.scalar_count] = ScalarRecord(label)
+                self.scalars[self.scalar_count].metric.add(value)
+                self.scalar_count += 1
+
+    @always_inline
     def reset(mut self):
         comptime if Self.Profile:
             self.count = 0
             self.wall_ns = 0
+            self.scalar_count = 0
 
     def report(self, title: StaticString = "dispatch profile"):
         comptime if Self.Profile:
@@ -346,6 +374,31 @@ struct Profiler[Profile: Bool, N: Int = 64](Copyable, Movable):
             var dark_pct = pct_str(dark, wall)
             var dark_pct_hot = heat_pct(dark, wall, dark_pct, colors)
             print(t"wall {wall_h}   accounted {accounted_h} ({accounted_pct})   dark {dark_h} ({dark_pct_hot})")
+
+            if self.scalar_count > 0:
+                var sname_w = 7
+                for i in range(self.scalar_count):
+                    var w = self.scalars[i].label.byte_length()
+                    if w > sname_w:
+                        sname_w = w
+                print()
+                print(t"=== {title} : scalar metrics ===")
+                print(
+                    pad_right("metric", sname_w) + pad_left("count", 8)
+                    + pad_left("min", 9) + pad_left("p50", 9)
+                    + pad_left("mean", 9) + pad_left("p99", 9)
+                    + pad_left("max", 9))
+                for i in range(self.scalar_count):
+                    ref sm = self.scalars[i].metric
+                    var sq = sm.quantiles(0.5, 0.99)
+                    print(
+                        pad_right(String(self.scalars[i].label), sname_w)
+                        + pad_left(String(sm.count), 8)
+                        + pad_left(String(sm.minv), 9)
+                        + pad_left(String(sq[0]), 9)
+                        + pad_left(String(sm.mean()), 9)
+                        + pad_left(String(sq[1]), 9)
+                        + pad_left(String(sm.maxv), 9))
 
 
 @always_inline

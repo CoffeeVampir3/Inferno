@@ -1,4 +1,5 @@
 from std.collections import InlineArray
+from std.math import iota
 from std.memory import UnsafePointer
 from std.sys.info import simd_width_of
 
@@ -32,11 +33,10 @@ def fwht_apply[T: DType, block: Int](
         comptime stride = 1 << stage
         comptime if stride < width:
             comptime mask = butterfly_shuffle[width, stride]()
-            var sign_buf = InlineArray[Scalar[T], width](fill=Scalar[T](1.0))
-            comptime for k in range(width):
-                comptime if (k >> stage) & 1 != 0:
-                    sign_buf[k] = Scalar[T](-1.0)
-            var sign = UnsafePointer(to=sign_buf).bitcast[Scalar[T]]().load[width=width]()
+            var lane = iota[DType.int32, width]()
+            var bit = (lane >> SIMD[DType.int32, width](Int32(stage))) & SIMD[
+                DType.int32, width](1)
+            var sign = SIMD[T, width](1) - bit.cast[T]() * SIMD[T, width](2)
             comptime for i in range(regs):
                 var partner = r[i].shuffle[mask=mask](r[i])
                 r[i] = r[i].fma(sign, partner)

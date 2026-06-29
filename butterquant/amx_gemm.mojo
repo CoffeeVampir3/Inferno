@@ -157,6 +157,8 @@ def amx_panel_2x32[
         block_finalize[write](f01, rb0, n1, AMX_TILE_M, wsc)
         block_finalize[write](f10, rb1, n0, AMX_TILE_M, wsc)
         block_finalize[write](f11, rb1, n1, AMX_TILE_M, wsc)
+        _ = facc
+    _ = c
 
 
 @always_inline
@@ -210,6 +212,8 @@ def amx_panel_1x32[
             block_accumulate(c1, f1, m_panel, b, nb, m_rows, act_scale)
         block_finalize[write](f0, m_panel, n0, m_rows, wsc)
         block_finalize[write](f1, m_panel, n1, m_rows, wsc)
+        _ = facc
+    _ = c
 
 
 def amx_gemm[

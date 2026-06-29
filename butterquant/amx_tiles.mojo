@@ -104,6 +104,7 @@ def prime_amx_worker():
     comptime if has_amx_int8():
         var cfg = make_224_i8_config()
         ldtilecfg(UnsafePointer(to=cfg))
+        _ = cfg
 
 
 @fieldwise_init

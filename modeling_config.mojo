@@ -1,12 +1,12 @@
 from tokenizer import BPETokenizer, AutoPreTokenizer, AutoByteTransform
-from modeling.gemma_4_moe import Gemma4
+from modeling.gemma_4_moe_bq import Gemma4
 from prompt_formatting import Gemma4Format
 
 
 comptime Model = Gemma4
 comptime ChatFormat = Gemma4Format
 comptime TOKENIZER_PATH = "checkpoints/gemma-4-26B-A4B-it/tokenizer.json"
-comptime MODEL_DIR = "checkpoints/gemma-4-26B-A4B-it"
+comptime MODEL_DIR = "checkpoints/gemma-4-26B-A4B-it-bq"
 
 comptime BOS_TOKEN_ID = 2
 comptime EOS_TOKEN_ID = 1

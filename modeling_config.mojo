@@ -5,8 +5,8 @@ from prompt_formatting import Gemma4Format
 
 comptime Model = Gemma4
 comptime ChatFormat = Gemma4Format
-comptime TOKENIZER_PATH = "checkpoints/gemma-4-26B-A4B-it-abliterated/tokenizer.json"
-comptime MODEL_DIR = "checkpoints/gemma-4-26B-A4B-it-abliterated-bq"
+comptime TOKENIZER_PATH = "checkpoints/gemma-4-26B-A4B-it/tokenizer.json"
+comptime MODEL_DIR = "checkpoints/gemma-4-26B-A4B-it-bq"
 
 comptime BOS_TOKEN_ID = 2
 comptime EOS_TOKEN_ID = 1

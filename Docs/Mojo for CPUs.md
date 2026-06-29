@@ -86,7 +86,7 @@ def main():
     var a, b = 1, 2
     var x = "hi"
 
-    # Stateless: empty capture list. Lifts to a top-level fn pointer.
+    # Stateless: empty capture list. Lifts to a top-level function pointer.
     def add_one(n: Int) {} -> Int: return n + 1
 
     # Explicit capture list with a default capture convention. `a` is captured
@@ -179,8 +179,8 @@ def use_pointer():
 | `StaticConstantOrigin` | Immutable values lasting program duration (e.g., string literals) |
 | `origin_of(value)` | Derived origin from value(s), returns `Origin` type |
 | Inferred | Captured from function argument via parameter inference |
-| `MutExternalOrigin` / `ImmutExternalOrigin` | Untracked memory (e.g. dynamically-allocated buffers) |
-| `MutAnyOrigin` / `ImmutAnyOrigin` | Wildcard - might access any live value (disables ASAP destruction) |
+| `MutUntrackedOrigin` / `ImmutUntrackedOrigin` | Empty origin - aliases nothing; untracked memory (e.g. dynamically-allocated buffers) |
+| `MutUnsafeAnyOrigin` / `ImmutUnsafeAnyOrigin` | Universal origin (unsafe) - might alias any live value (disables ASAP destruction); escape hatch slated for removal |
 
 ```mojo
 origin_of(self)
@@ -202,9 +202,9 @@ struct BoxedString:
 
 **Origin unions**: Union of origins extends all constituent lifetimes. Mutable only if all constituents are mutable.
 
-**External origins**: For memory not owned by any variable (e.g. `alloc()` returns a pointer with `MutExternalOrigin`). You manage the lifetime.
+**Untracked origins**: The empty origin, for memory from outside the Mojo program (e.g. `alloc()` returns a pointer with `MutUntrackedOrigin`). It aliases nothing, so the lifetime checker has nothing to track and you manage the lifetime.
 
-**Wildcard origins**: Discouraged. Using a wildcard-origin pointer disables ASAP destruction for all values in scope while the pointer is live.
+**Universal origin (unsafe)**: Discouraged escape hatch. Using a `MutUnsafeAnyOrigin` pointer might alias anything and disables ASAP destruction for all values in scope while the pointer is live. The `Unsafe` prefix marks it as slated for deprecation and removal.
 
 ---
 
@@ -387,7 +387,7 @@ ptr.scatter[width=8](vals, offsets)
 - Freeing same memory twice = UB
 - Double-check: who allocates, who frees
 
-**Explicitly-destroyed types (linear types)**: `UnsafePointer`, `Pointer`, `OwnedPointer`, `Span`, `List`, `InlineArray`, `Optional`, `Variant`, and variadic packs/lists can contain explicitly-destroyed types. `Iterator.Element` does not require `ImplicitlyDestructible`.
+**Explicitly-destroyed types (linear types)**: `UnsafePointer`, `Pointer`, `OwnedPointer`, `Span`, `List`, `InlineArray`, `Optional`, `Variant`, and variadic packs/lists can contain explicitly-destroyed types. `Iterator.Element` does not require `ImplicitlyDeletable`.
 
 ```mojo
 def __init__(out self, args)
@@ -508,7 +508,7 @@ print(x.dtype)                             # On instance: int32
 
 # Pattern 1: derived conformance — "container does X if element does X"
 @fieldwise_init
-struct Wrapper[T: Copyable & ImplicitlyDestructible](
+struct Wrapper[T: Copyable & ImplicitlyDeletable](
     Writable where conforms_to(T, Writable),
 ):
     var value: Self.T
@@ -809,7 +809,7 @@ trait VeryTrivial(TrivialRegisterPassable):  # Conformers must be TrivialRegiste
 | `ImplicitlyCopyable` | Allows implicit copies via `Copyable` machinery (refines `Copyable`) |
 | `Defaultable` | `__init__(out self)` |
 | `AnyType` | Base trait, no `__del__()` required (supports explicitly-destroyed types) |
-| `ImplicitlyDestructible` | `__del__(deinit self)` callable by compiler. `struct` auto-inherits this; `trait` must opt-in explicitly. |
+| `ImplicitlyDeletable` | `__del__(deinit self)` callable by compiler. `struct` auto-inherits this; `trait` must opt-in explicitly. |
 | `RegisterPassable` | Type is register-passable (passed in registers) |
 | `TrivialRegisterPassable` | Type is trivially register-passable (no take/copy/destroy) |
 | `KeyElement` | `Copyable & Hashable & Equatable` |
@@ -851,12 +851,12 @@ def maybe_print[T: AnyType](value: T):
         print("[UNPRINTABLE]")
 ```
 
-**Trait inheritance for `ImplicitlyDestructible`:**
-- `struct` declarations automatically inherit from `ImplicitlyDestructible`
+**Trait inheritance for `ImplicitlyDeletable`:**
+- `struct` declarations automatically inherit from `ImplicitlyDeletable`
 - `trait` declarations do **not** auto-inherit — opt-in explicitly if needed:
 ```mojo
 # Trait that requires implicit destructibility
-trait Foo(ImplicitlyDestructible):
+trait Foo(ImplicitlyDeletable):
     ...
 
 # Trait that supports explicitly-destroyed (linear) types — no annotation needed
@@ -968,19 +968,17 @@ len(s.codepoints())                        # Same as count_codepoints() via Size
 # or count_codepoints() - it's ambiguous which one you mean.
 s.is_codepoint_boundary(i)                 # On StringSlice; aborts mid-codepoint slicing
 
-# Three index spaces - pick the unit you mean
+# Three index spaces - pick the unit you mean. Codepoint and grapheme
+# subscripts are Unicode-aware and work on both String and StringSlice.
 b = s[byte=0]                              # One byte; aborts mid-codepoint
 sub = s[byte=0:5]                          # O(1) byte-indexed substring (StringSlice)
-# Codepoint and grapheme subscripts live on StringSlice. The current surface:
-#   - codepoint=N      single codepoint (O(n) forward scan)
-#   - grapheme=N:M     grapheme-cluster range slice (O(n))
-# `codepoint=N:M` slicing and single `grapheme=N` indexing are not exposed;
-# use the iterators (codepoint_slices(), graphemes(), nth_grapheme(n),
-# split_at_grapheme(n)) when you need them.
-cp = StringSlice(s)[codepoint=0]           # One codepoint (variable byte width)
-gp_range = StringSlice(s)[grapheme=0:3]    # First 3 graphemes
+cp = s[codepoint=0]                        # Single codepoint (O(n) forward scan)
+cp_range = String("🔄🔥🔄")[codepoint=1:2]  # Codepoint slice -> "🔥"
+gp = String("👨‍🚀🧑‍🌾क्षि")[grapheme=1]        # Single grapheme -> "🧑‍🌾"
+gp_range = s[grapheme=0:3]                 # Grapheme-cluster range slice (O(n))
 
 # Iteration
+for byte in s.bytes(): pass                # Yields raw UTF-8 bytes (BytesIter), no decoding
 for cp in s.codepoints(): pass             # Yields Codepoint values
 for slc in s.codepoint_slices(): pass      # Yields one-codepoint StringSlices
 for slc in s.codepoint_slices_reversed(): pass
@@ -1027,7 +1025,7 @@ joined: String = ", ".join(parts)                            # Delimiter joins W
 
 # Conversion / interop
 buf = s.as_bytes()                         # Span[Byte, ...] - immutable
-mbuf = s.as_bytes_mut()                    # Span[Byte, ...] - mutable; corrupting UTF-8 is on you
+mbuf = s.unsafe_as_bytes_mut()             # Span[Byte, ...] - mutable; corrupting UTF-8 is on you
 p = s.unsafe_ptr()                         # UnsafePointer[Byte, ...]
 p = s.unsafe_ptr_mut(capacity=0)           # Mutable pointer, may reallocate
 c = s.as_c_string_slice()                  # CStringSlice with a guaranteed nul terminator
@@ -1248,8 +1246,11 @@ show("ascii  ", "hello")        # bytes=5   codepoints=5  graphemes=5
 Use `byte_length()` for buffer math (it's O(1)). Use `count_graphemes()` only when the answer needs to match what a human would call a "character." Slicing follows the same rule — `byte=` is O(1), `codepoint=` and `grapheme=` are O(n) forward scans.
 
 ### Collections
+
+Core collections (`List`, `Deque`, `LinkedList`, `InlineArray`, `Dict`, `Set`) accept move-only elements: the minimum element bound is `Movable & ImplicitlyDeletable`, not `Copyable`. Copy-requiring methods stay gated on `Copyable`. `Dict.setdefault()` and `Set.add()` take their argument by `var T`; for move-only types call `d.setdefault(key^, default)` / `set.add(value^)`.
+
 ```mojo
-from std.collections import Set, Deque, Counter, LinkedList, BitSet
+from std.collections import Set, Deque, Counter, LinkedList, BinaryHeap, BitSet
 from collections.interval import Interval
 
 # List (conforms to Equatable, Writable)
@@ -1268,6 +1269,7 @@ subspan = span.unsafe_subspan(offset, length)
 for item in span: pass
 
 # Dict (raises DictKeyError on missing key; conforms to Writable)
+# Backing buffer is allocated lazily — a default/capacity=0 Dict does no heap allocation until first insert.
 dict = Dict[String, Int]() | Dict[String, Int](power_of_two_initial_capacity=1024)
 dict = {"key": value}
 dict[key] = value
@@ -1305,7 +1307,12 @@ counter1 | counter2
 list = LinkedList[Int](1, 2, 3)
 list.append(val) | prepend(val) | pop() | pop(idx)
 list.reverse() | insert(idx, val)
+list.index(val)                            # First occurrence (no start/stop params)
 for ref item in list: pass
+
+# BinaryHeap (list-backed binary max-heap)
+heap = BinaryHeap[Int]()
+heap.push(val) | pop() | peek()
 
 # InlineArray (not ImplicitlyCopyable - must explicitly copy or take references)
 var arr: InlineArray[Int, 3] = [1, 2, 3]  # Literal construction required
@@ -1390,13 +1397,13 @@ ptr = alloc[Int](count)                    # Aborts if allocation fails (debug_a
 ptr = alloc[Float32](256, alignment=64)    # With explicit alignment
 var ly = Layout[Int](count=count)
 ptr = alloc(ly)                            # Layout-aware allocator; free(ptr, ly) pairs cleanly
-ptr = UnsafePointer[Int, MutExternalOrigin].unsafe_dangling()  # Non-null placeholder for split init
+ptr = UnsafePointer[Int, MutUntrackedOrigin].unsafe_dangling()  # Non-null placeholder for split init
 
 # Initialization (allocated memory is uninitialized)
 ptr.init_pointee_copy(value)               # Copy value into memory
 ptr.init_pointee_move(value^)              # Move value into memory
 ptr = UnsafePointer(to=existing_value)     # Point to existing value (no alloc needed)
-ptr = UnsafePointer[UInt8, MutAnyOrigin](unsafe_from_address=mmio_address)  # From raw address
+ptr = UnsafePointer[UInt8, MutUntrackedOrigin](unsafe_from_address=mmio_address)  # From raw address (memory outside Mojo)
 
 # Dereferencing (memory must be initialized)
 value = ptr[]                              # Read pointee
@@ -1428,7 +1435,7 @@ ptr.store[volatile=True](value)            # Volatile store (for MMIO)
 
 # Type casting
 new_ptr = ptr.bitcast[NewType]()           # Same address, different type
-safe_cast = ptr.as_any_origin() | as_immutable()
+unsafe_any = ptr.as_unsafe_any_origin() | as_immutable()
 unsafe_cast = ptr.unsafe_mut_cast[True]() | unsafe_origin_cast[new_origin]()
 ```
 
@@ -1443,16 +1450,16 @@ A field or parameter that "doesn't have a real pointer yet" can mean two differe
 ```mojo
 # Split init: field allocated later in __init__
 struct Pool:
-    var buf: UnsafePointer[Byte, MutAnyOrigin]
+    var buf: UnsafePointer[Byte, MutUntrackedOrigin]  # struct fields cannot hold UnsafeAnyOrigin
     def __init__(out self, n: Int):
-        self.buf = UnsafePointer[Byte, MutAnyOrigin].unsafe_dangling()
+        self.buf = UnsafePointer[Byte, MutUntrackedOrigin].unsafe_dangling()
         # ... preliminary work ...
         self.buf = alloc[Byte](n)
 
 # Nullable: caller may pass nothing
 def sigaltstack(
-    ss: UnsafePointer[StackT, MutAnyOrigin],
-    old: Optional[UnsafePointer[StackT, MutAnyOrigin]] = None,
+    ss: UnsafePointer[StackT, MutUntrackedOrigin],
+    old: Optional[UnsafePointer[StackT, MutUntrackedOrigin]] = None,
 ) -> Int:
     return syscall(NR_sigaltstack, Int(ss),
                    Int(old.value()) if old else 0)
@@ -1462,7 +1469,7 @@ If you find yourself reaching for `unsafe_dangling()` and *also* writing a "is t
 
 **Origin Tracking:**
 ```mojo
-# alloc() returns MutExternalOrigin (untracked by lifetime checker)
+# alloc() returns MutUntrackedOrigin (untracked by lifetime checker)
 # UnsafePointer(to=value) infers origin from value
 
 def unsafe_ptr(ref self) -> UnsafePointer[T, origin_of(self)]:
@@ -1483,7 +1490,7 @@ def add(a: Int32, b: Int32) abi("C") -> Int32:
 comptime CUnaryF64 = def(Float64) abi("C") -> Float64
 
 # Raw symbol / function calls
-ptr = external_call["c_func", UnsafePointer[Int, MutExternalOrigin]]()
+ptr = external_call["c_func", UnsafePointer[Int, MutUntrackedOrigin]]()
 
 # Opaque pointer (void* equivalent)
 comptime OpaquePointer = UnsafePointer[NoneType]
@@ -1535,7 +1542,7 @@ var typed = stack_allocation[count, MyType]()
 **Origin** - Compiler token for memory lifetime tracking:
 - Prevents use-after-free, ensures safe aliasing
 - Generic parameter in function signatures: `ref [origin] data`
-- Common origins: `MutAnyOrigin`, `ImmutAnyOrigin`, `MutExternalOrigin`, `ImmutExternalOrigin`
+- Common origins: `MutUnsafeAnyOrigin`, `ImmutUnsafeAnyOrigin`, `MutUntrackedOrigin`, `ImmutUntrackedOrigin`
 - Use `origin_of(value)` in generic code when needed
 
 **Layout** - Compile-time memory organization:
@@ -1994,11 +2001,11 @@ cp_async_k_major[dtype, eviction_policy](dst, src)
 cp_async_mn_major[dtype, eviction_policy](dst, src)
 
 # Math Operations
-result = sum/max[axis](inp, outp)
-result = sum/max[axis](inp)
-result = max[dtype, layout](x, y)
+result = sum/max[reduce_dim=axis](inp, outp)   # reduce_dim is keyword-only compile-time param
+result = sum/max[reduce_dim=axis](inp)
+result = max[dtype, layout](x, y)              # elementwise binary max (not a reduction)
 scalar = mean(src)
-mean[reduce_axis](src, dst)
+mean[reduce_dim=axis](src, dst)
 scalar = variance(src, correction=1)
 outer_product_acc(res, lhs, rhs)
 
@@ -2010,7 +2017,7 @@ dev_buf = ctx.enqueue_create_buffer[dtype](size)
 tensor = LayoutTensor[dtype, layout](dev_buf)
 
 tile = LayoutTensor[
-    dtype, layout, MutAnyOrigin,
+    dtype, layout, MutUnsafeAnyOrigin,
     address_space=AddressSpace.SHARED
 ].stack_allocation()
 
@@ -2293,12 +2300,18 @@ map[IterableType, ResultType, function](ref iterable)
 
 # Extras
 from std.iter import peekable
-from std.itertools import count, repeat, product, cycle, take_while, drop_while
+from std.itertools import count, repeat, product, cycle, take, drop, take_while, drop_while
 
 cycle(iterable)                            # Cycles through elements indefinitely
+take(iterable, n)                          # Yields the first n elements
+drop(iterable, n)                          # Drops the first n elements, yields rest
 take_while[predicate](iterable)            # Yields while predicate returns True
 drop_while[predicate](iterable)            # Drops while predicate returns True, yields rest
 peekable(iterator)                         # Peek at next element without advancing
+
+# Iterator.nth(n): advance n elements (destroying them), return the next or None
+iter(l).nth(0).value()                     # First element
+missing = iter(l).nth(10)                   # None (Optional) if iterator runs out
 ```
 
 ```mojo
@@ -2500,7 +2513,7 @@ def print_fields[T: AnyType]():
 def main():
     print_fields[Point]()
     comptime idx = reflect[Point].field_index["x"]()         # 0
-    comptime y_handle = reflect[Point].field_type["y"]       # Reflected[Float32]
+    comptime y_handle = reflect[Point].field["y"]            # Reflected[Float32]; .T for the bare type
     print(idx)
     print(y_handle.name())                                   # "SIMD[DType.float32, 1]"
 

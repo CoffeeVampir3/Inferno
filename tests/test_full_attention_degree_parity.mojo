@@ -153,6 +153,7 @@ def run_step[P: BurstThreadPool, o: ImmutOrigin, //](
     dispatch_bq_attn_prep[
         head_dim=HEAD_DIM, rope_half=ROPE_HALF, pair_stride=PAIR_STRIDE,
         sqrt_n=SQRT_HD, n_eps=HD_EPS,
+        q_scale=Float32(1.0) / SQRT_HD, norm_v=False,
         max_worker_count=POOL_WORKERS,
     ](q_src, k_src, v_src, q_norm, k_norm, q_i8, qi_bias, f_q,
       k_cache, k_scale, v_cache, v_scale, cos_table, sin_table,

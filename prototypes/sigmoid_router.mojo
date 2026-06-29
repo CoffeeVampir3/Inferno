@@ -141,7 +141,8 @@ def dispatch_m3_router_expert[
 
     @parameter
     def make(r: Int) -> K:
-        return K(x[r], gate[r], bias[r], cands_out[r],
+        var cands_owned = cands_out[r]
+        return K(x[r], gate[r], bias[r], cands_owned,
                  r * epr, seq_len, 0, 0, 0)
 
     @parameter
@@ -229,7 +230,7 @@ def dispatch_merge_m3_router[
     var data_bytes = total_sources * seq_len * top_k * size_of[
         M3RouterCandidate]()
 
-    var nws_ptr = IntPtr(unsafe_from_address=Int(nws.unsafe_ptr()))
+    var nws_ptr = nws.unsafe_ptr().unsafe_mut_cast[True]().as_unsafe_any_origin()
     var per_node = (seq_len + tp - 1) // tp
     comptime MK = M3RouterMergeKernel[top_k, scaling, o]
     comptime GK = RouteGatherKernel[top_k, o]

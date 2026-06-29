@@ -4,6 +4,7 @@ import linux.sys as linux
 
 
 comptime READ_CHUNK = 65536
+comptime POLL_CHUNK = 256
 
 comptime PASTE_ON = "\x1b[?2004h"
 comptime PASTE_OFF = "\x1b[?2004l"
@@ -79,6 +80,65 @@ struct RawGuard(Movable):
     def __del__(deinit self):
         if self.active:
             print(PASTE_OFF, end="", flush=True)
+            _ = linux.linux_sys().sys_tcsetattr(
+                self.fd, UnsafePointer(to=self.saved))
+
+
+struct CancelWatch(Movable):
+    """Non-blocking watch for an interrupt during model generation.
+
+    Construction puts the tty into cbreak mode with signal generation off
+    and reads that return immediately, so `triggered` can poll for Esc or
+    Ctrl+C between decode steps without ever blocking the generation loop.
+    The destructor restores the saved settings, so the terminal is left
+    exactly as it was found.
+    """
+
+    var fd: Int
+    var saved: linux.Termios
+    var active: Bool
+
+    def __init__(out self, fd: Int = 0):
+        self.fd = fd
+        self.saved = linux.Termios()
+        self.active = False
+        var sys = linux.linux_sys()
+        if sys.sys_tcgetattr(self.fd, UnsafePointer(to=self.saved)) != 0:
+            return
+        var work = self.saved.copy()
+        work.c_lflag &= ~UInt32(
+            linux.TermLocalFlag.ICANON | linux.TermLocalFlag.ECHO
+            | linux.TermLocalFlag.ISIG | linux.TermLocalFlag.IEXTEN)
+        work.c_iflag &= ~UInt32(
+            linux.TermInputFlag.ICRNL | linux.TermInputFlag.IXON)
+        work.c_cc[linux.TermControlChar.VMIN] = UInt8(0)
+        work.c_cc[linux.TermControlChar.VTIME] = UInt8(0)
+        _ = sys.sys_tcsetattr(self.fd, UnsafePointer(to=work))
+        self.active = True
+
+    def triggered(mut self) -> Bool:
+        # Drain whatever is queued without blocking (VMIN/VTIME are 0, so a
+        # read returns at once) and report whether Esc or Ctrl+C is among it.
+        if not self.active:
+            return False
+        var sys = linux.linux_sys()
+        var chunk = InlineArray[Byte, POLL_CHUNK](fill=Byte(0))
+        var hit = False
+        while True:
+            var rc = sys.sys_read(self.fd, Int(UnsafePointer(to=chunk)), POLL_CHUNK)
+            if rc == linux.EINTR:
+                continue
+            if rc <= 0:
+                break
+            for i in range(rc):
+                if chunk[i] == CTRL_C or chunk[i] == ESC:
+                    hit = True
+            if rc < POLL_CHUNK:
+                break
+        return hit
+
+    def __del__(deinit self):
+        if self.active:
             _ = linux.linux_sys().sys_tcsetattr(
                 self.fd, UnsafePointer(to=self.saved))
 

@@ -39,10 +39,10 @@ from quant.plan import (
 from quant.manifest import quant_manifest, QuantRole
 
 
-comptime PtrU8 = UnsafePointer[UInt8, MutAnyOrigin]
-comptime PtrF32 = UnsafePointer[Float32, MutAnyOrigin]
-comptime PtrBF16 = UnsafePointer[Scalar[DType.bfloat16], MutAnyOrigin]
-comptime PtrI8 = UnsafePointer[Scalar[DType.int8], MutAnyOrigin]
+comptime PtrU8 = UnsafePointer[UInt8, MutUntrackedOrigin]
+comptime PtrF32 = UnsafePointer[Float32, MutUntrackedOrigin]
+comptime PtrBF16 = UnsafePointer[Scalar[DType.bfloat16], MutUntrackedOrigin]
+comptime PtrI8 = UnsafePointer[Scalar[DType.int8], MutUntrackedOrigin]
 comptime W = simd_width_of[DType.float32]()
 
 comptime PANEL_ROWS = 2048
@@ -73,7 +73,7 @@ def fold_shape(ref shape: List[Int]) -> Tuple[Int, Int]:
 
 
 def find_tensor(
-    name: String, headers: Span[SafetensorsHeader, MutAnyOrigin],
+    name: String, headers: Span[SafetensorsHeader, MutUntrackedOrigin],
 ) -> Optional[LocatedTensor]:
     for i in range(len(headers)):
         ref h = headers[i]
@@ -125,14 +125,13 @@ def two_sided_m_of[rot: RotationMode]() -> Int:
 
 
 @always_inline
-def as_mut_any_span[T: Movable](
+def as_mut_untracked_span[T: Movable](
     ref items: List[T],
-) -> Span[T, MutAnyOrigin]:
+) -> Span[T, MutUntrackedOrigin]:
     """Strip origin tracking from `items` for storage in worker structs.
     Caller guarantees `items` outlives the returned span."""
-    return Span[T, MutAnyOrigin](
-        ptr=UnsafePointer[T, MutAnyOrigin](
-            unsafe_from_address=Int(items.unsafe_ptr())),
+    return Span[T, MutUntrackedOrigin](
+        ptr=items.unsafe_ptr().unsafe_mut_cast[True]().unsafe_origin_cast[MutUntrackedOrigin](),
         length=len(items),
     )
 
@@ -217,7 +216,7 @@ def write_sync(
         return False
 
 
-def write_sync_many(mut ring: IoRing[QD], ops: Span[WriteOp[], MutAnyOrigin]) -> Bool:
+def write_sync_many(mut ring: IoRing[QD], ops: Span[WriteOp[], MutUntrackedOrigin]) -> Bool:
     """Submit `ops` in one or more batches and drain all completions.
     Assigns each op's `id` to its index in the span so completion validation
     is O(1). Caller guarantees the span lives until this returns."""
@@ -527,7 +526,7 @@ struct Quantizer(Movable):
         comptime SRC = encoding.DTYPE
         comptime QV = quant
 
-        var loc_opt = find_tensor(full, as_mut_any_span(self.headers))
+        var loc_opt = find_tensor(full, as_mut_untracked_span(self.headers))
         if not loc_opt:
             print(t"quant plan: missing {full}")
             return False
@@ -650,7 +649,7 @@ struct Quantizer(Movable):
         return True
 
     def locate_gamma(mut self, mut g: GammaRef, expected_cols: Int) -> Bool:
-        var loc_opt = find_tensor(g.name, as_mut_any_span(self.headers))
+        var loc_opt = find_tensor(g.name, as_mut_untracked_span(self.headers))
         if not loc_opt:
             print(t"quant plan: missing gamma {g.name}")
             return False
@@ -721,7 +720,7 @@ struct Quantizer(Movable):
         var bias_byte_size = 0
         var bias_src_dtype = DType.float32
         if bias_name.byte_length() > 0:
-            var bias_loc_opt = find_tensor(bias_name, as_mut_any_span(self.headers))
+            var bias_loc_opt = find_tensor(bias_name, as_mut_untracked_span(self.headers))
             if not bias_loc_opt:
                 print(t"quant plan: missing router bias {bias_name}")
                 return False
@@ -773,7 +772,7 @@ struct Quantizer(Movable):
     def write_header(mut self) -> Bool:
         var header = build_header(self.entries)
         var header_size = len(header)
-        var hp = PtrU8(unsafe_from_address=Int(header.unsafe_ptr()))
+        var hp = header.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin]()
         if not write_sync(self.ring, self.output_fd_idx, 0, header_size, hp):
             return False
         self.data_start = header_size
@@ -847,10 +846,10 @@ struct Quantizer(Movable):
         var kernels = List[QuantShardKernel](capacity=num_workers)
         for w in range(num_workers):
             kernels.append(QuantShardKernel(
-                fds=as_mut_any_span(self.fds),
+                fds=as_mut_untracked_span(self.fds),
                 output_fd_idx=self.output_fd_idx,
-                headers=as_mut_any_span(self.headers),
-                slots=as_mut_any_span(buckets[w]),
+                headers=as_mut_untracked_span(self.headers),
+                slots=as_mut_untracked_span(buckets[w]),
                 data_start=self.data_start,
                 scratch=scratches[w],
                 rank=worker_rank[w],
@@ -861,9 +860,8 @@ struct Quantizer(Movable):
         var worker_start = 0
         for r in range(num_ranks):
             var jobs = workers_per_rank[r]
-            var kernel_span = Span[QuantShardKernel, MutAnyOrigin](
-                ptr=UnsafePointer[QuantShardKernel, MutAnyOrigin](
-                    unsafe_from_address=Int(UnsafePointer(to=kernels[worker_start]))),
+            var kernel_span = Span[QuantShardKernel, MutUntrackedOrigin](
+                ptr=UnsafePointer(to=kernels[worker_start]).unsafe_origin_cast[MutUntrackedOrigin](),
                 length=jobs)
             (pool_base + r)[].dispatch(kernel_span, jobs)
             worker_start += jobs
@@ -908,15 +906,15 @@ def slot_name(read plan: SlotPlan) -> String:
 struct QuantWorker(Movable):
     """One thread's worth of quantization state: its own io_uring and
     arena-backed staging scratch. Fields holding spans into shared, read-only
-    storage (fds / headers) carry origins stripped to MutAnyOrigin so that
+    storage (fds / headers) carry origins stripped to MutUntrackedOrigin so that
     QuantWorker is safe to construct on a worker thread; the caller is
     responsible for keeping the backing storage alive."""
 
     var ring: IoRing[QD]
     var scratch: QuantScratch
-    var fds: Span[Int32, MutAnyOrigin]
+    var fds: Span[Int32, MutUntrackedOrigin]
     var output_fd_idx: Int
-    var headers: Span[SafetensorsHeader, MutAnyOrigin]
+    var headers: Span[SafetensorsHeader, MutUntrackedOrigin]
     var data_start: Int
     var rank: Int
     var worker_idx: Int
@@ -924,9 +922,9 @@ struct QuantWorker(Movable):
 
     def __init__(
         out self,
-        fds: Span[Int32, MutAnyOrigin],
+        fds: Span[Int32, MutUntrackedOrigin],
         output_fd_idx: Int,
-        headers: Span[SafetensorsHeader, MutAnyOrigin],
+        headers: Span[SafetensorsHeader, MutUntrackedOrigin],
         data_start: Int,
         scratch: QuantScratch,
         rank: Int = 0,
@@ -954,7 +952,7 @@ struct QuantWorker(Movable):
     def __bool__(self) -> Bool:
         return self.ready
 
-    def run(mut self, slots: Span[SlotPlan, MutAnyOrigin]) -> Bool:
+    def run(mut self, slots: Span[SlotPlan, MutUntrackedOrigin]) -> Bool:
         for i in range(len(slots)):
             var plan = slots[i].copy()
             if not self.execute_slot(plan):
@@ -1205,11 +1203,12 @@ struct QuantWorker(Movable):
                 src=scales.bitcast[UInt8](), id=1)
             var n_ops = 2
 
-            var ops_span = Span[WriteOp[], MutAnyOrigin](
-                ptr=UnsafePointer[WriteOp[], MutAnyOrigin](
-                    unsafe_from_address=Int(UnsafePointer(to=ops[0]))),
+            var ops_span = Span[WriteOp[], MutUntrackedOrigin](
+                ptr=UnsafePointer(to=ops[0]).unsafe_origin_cast[MutUntrackedOrigin](),
                 length=n_ops)
-            if not write_sync_many(self.ring, ops_span):
+            var write_ok = write_sync_many(self.ring, ops_span)
+            _ = ops^
+            if not write_ok:
                 return False
 
             row_off += panel_rows
@@ -1365,10 +1364,10 @@ struct QuantShardKernel(BurstKernel):
     """Per-worker payload dispatched through a BurstPool mailbox. Owns no
     resources — every field is POD with caller-managed backing storage.
     Mirrors `LoadShardKernel` in `linux/io_uring.mojo:601`."""
-    var fds: Span[Int32, MutAnyOrigin]
+    var fds: Span[Int32, MutUntrackedOrigin]
     var output_fd_idx: Int
-    var headers: Span[SafetensorsHeader, MutAnyOrigin]
-    var slots: Span[SlotPlan, MutAnyOrigin]
+    var headers: Span[SafetensorsHeader, MutUntrackedOrigin]
+    var slots: Span[SlotPlan, MutUntrackedOrigin]
     var data_start: Int
     var scratch: QuantScratch
     var rank: Int

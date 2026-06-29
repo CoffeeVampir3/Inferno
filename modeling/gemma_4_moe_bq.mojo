@@ -487,7 +487,7 @@ def dispatch_bq_sliding_attention_qkv[
 
     dispatch_bq_attn_prep[
         head_dim=head_dim, rope_half=rope_half, pair_stride=head_dim // 2,
-        sqrt_n=sqrt_hd, n_eps=hd_eps,
+        sqrt_n=sqrt_hd, n_eps=hd_eps, q_scale=Float32(1.0), norm_v=True,
         max_worker_count=max_worker_count,
     ](q_outs, k_outs, v_outs,
       attn.q_norm.binding(attn_ctx), attn.k_norm.binding(attn_ctx),
@@ -586,7 +586,7 @@ def dispatch_bq_full_attention_qkv[
 
     dispatch_bq_attn_prep[
         head_dim=head_dim, rope_half=rope_half, pair_stride=pair_stride,
-        sqrt_n=sqrt_hd, n_eps=hd_eps,
+        sqrt_n=sqrt_hd, n_eps=hd_eps, q_scale=Float32(1.0), norm_v=True,
         max_worker_count=max_worker_count,
     ](q_outs, k_outs, k_outs,
       attn.q_norm.binding(attn_ctx), attn.k_norm.binding(attn_ctx),

@@ -494,7 +494,7 @@ def dispatch_bq_full_attention[
 @fieldwise_init
 struct BqAttnPrepKernel[
     head_dim: Int, rope_half: Int, pair_stride: Int,
-    sqrt_n: Float32, n_eps: Float32,
+    sqrt_n: Float32, n_eps: Float32, q_scale: Float32, norm_v: Bool,
 ](RangePartitionedKernel):
     var runs: UnsafePointer[KVRunTable, MutAnyOrigin]
     var q_src: BF16Ptr
@@ -553,7 +553,7 @@ struct BqAttnPrepKernel[
                 ](q_tok + h * Self.head_dim, self.q_norm, cos_row, sin_row,
                   qi_tok + h * Self.head_dim)
                 (self.qi_bias + tok * self.num_q + h)[] = Float32(res[1]) * 128.0
-                (self.f_q + tok * self.num_q + h)[] = res[0]
+                (self.f_q + tok * self.num_q + h)[] = res[0] * Self.q_scale
 
             if pos % self.cache_degree == self.rank:
                 var slot = kv.slot(0, pos // self.cache_degree)
@@ -571,7 +571,7 @@ struct BqAttnPrepKernel[
                       k_dst + h * Self.head_dim)
                     ks_dst[h] = sk[0]
                     var sv = prep_head_v_i8[
-                        Self.head_dim, Self.sqrt_n, Self.n_eps,
+                        Self.head_dim, Self.norm_v, Self.sqrt_n, Self.n_eps,
                     ](v_tok + h * Self.head_dim, v_dst + h * Self.head_dim)
                     vs_dst[h] = sv
 
@@ -584,7 +584,7 @@ struct BqAttnPrepKernel[
 def dispatch_bq_attn_prep[
     P: BurstThreadPool, Profile: Bool, N: Int, o: ImmutOrigin, //,
     head_dim: Int, rope_half: Int, pair_stride: Int,
-    sqrt_n: Float32, n_eps: Float32,
+    sqrt_n: Float32, n_eps: Float32, q_scale: Float32, norm_v: Bool,
     max_worker_count: Int = 128,
 ](
     q_src: Binding[BFloat16, o],
@@ -609,7 +609,7 @@ def dispatch_bq_attn_prep[
     mut prof: Profiler[Profile, N],
 ):
     comptime K = BqAttnPrepKernel[
-        head_dim, rope_half, pair_stride, sqrt_n, n_eps]
+        head_dim, rope_half, pair_stride, sqrt_n, n_eps, q_scale, norm_v]
     var row_bytes = (num_q + 2 * num_kv) * head_dim * 6
     var nq = num_q
     var nkv = num_kv

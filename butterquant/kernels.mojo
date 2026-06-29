@@ -3,7 +3,7 @@ from std.math import max
 from std.os import abort
 
 from simd_math.ops import quantize_i8, sqrt
-from butterquant.convert import store_bf16
+from butterquant.convert import store_bf16, store_out
 from butterquant.fwht import fwht_block, fwht_row
 from butterquant.types import WF
 
@@ -31,6 +31,21 @@ def gamma_sqrt_abs_in_place(gamma: PtrF32, cols: Int):
         var v = abs((gamma + k).load[width=WIDTH]())
         (gamma + k).store(sqrt[DType.float32, WIDTH](v))
         k += WIDTH
+
+
+@always_inline
+def add_offset_in_place[dt: DType](p: SrcPtr[dt], count: Int, offset: Float32):
+    var off = SIMD[DType.float32, WIDTH](offset)
+    var k = 0
+    while k + WIDTH <= count:
+        var v = (p + k).load[width=WIDTH]().cast[DType.float32]() + off
+        store_out[dt, WIDTH](v, p + k)
+        k += WIDTH
+    var off1 = SIMD[DType.float32, 1](offset)
+    while k < count:
+        var v1 = (p + k).load[width=1]().cast[DType.float32]() + off1
+        store_out[dt, 1](v1, p + k)
+        k += 1
 
 
 @always_inline
